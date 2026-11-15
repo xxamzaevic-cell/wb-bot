@@ -345,6 +345,142 @@ def build(kind, label, d1, d2, camps, stats, ords, rate, bal, send_at):
     return "\n".join(L)
 
 
+# ---------------------------------------------------------------- сауда / пайда
+def sales_since(d1):
+    """Сатып алулар (S...) және қайтарулар/отказдар (R...) d1-ден бастап."""
+    try:
+        return wb("GET", f"{STAT}/api/v1/supplier/sales",
+                  params={"dateFrom": d1.isoformat(), "flag": 0},
+                  tries=5, max_wait=70) or []
+    except Exception:
+        return None
+
+
+def cost_of(nm, art):
+    """Себестоимость (₸) config.json → cost_price: nmId немесе артикул бойынша."""
+    cp = CFG.get("cost_price", {})
+    v = cp.get(str(nm))
+    if v is None and art:
+        v = cp.get(art)
+    return v
+
+
+def build_sales(title, d1, d2, camps, stats, ords, sales, rate):
+    _, ad_nm = agg_ads(stats, camps, d1, d2)
+    logi = CFG.get("logistics_per_unit", 0)
+    def_ratio = CFG.get("default_forpay_ratio", 0.7)
+
+    P = {}  # nmId → көрсеткіштер
+
+    def card(nm, row):
+        return P.setdefault(nm, {"art": row.get("supplierArticle", ""),
+                                 "subject": row.get("subject", ""),
+                                 "ord": 0, "ord_sum": 0, "cancel": 0,
+                                 "buy": 0, "buy_sum": 0, "buy_pay": 0,
+                                 "ret": 0, "ret_sum": 0, "ret_pay": 0,
+                                 "ratio_p": 0, "ratio_f": 0})
+
+    for o in ords or []:
+        if not (d1 <= order_dt(o).date() <= d2):
+            continue
+        c = card(o["nmId"], o)
+        if o.get("isCancel"):
+            c["cancel"] += 1
+        else:
+            c["ord"] += 1
+            c["ord_sum"] += (o.get("priceWithDisc") or 0) * rate
+
+    for s in sales or []:
+        if not (d1 <= order_dt(s).date() <= d2):
+            continue
+        c = card(s["nmId"], s)
+        price = abs(s.get("priceWithDisc") or 0) * rate
+        pay = abs(s.get("forPay") or 0) * rate
+        if str(s.get("saleID", "")).startswith("R"):
+            c["ret"] += 1
+            c["ret_sum"] += price
+            c["ret_pay"] += pay
+        else:
+            c["buy"] += 1
+            c["buy_sum"] += price
+            c["buy_pay"] += pay
+            c["ratio_p"] += price
+            c["ratio_f"] += pay
+
+    tot_p = sum(c["ratio_p"] for c in P.values())
+    glob_ratio = (sum(c["ratio_f"] for c in P.values()) / tot_p) if tot_p else def_ratio
+
+    T = {k: 0 for k in ("ord", "ord_sum", "cancel", "buy", "buy_sum", "ret", "ret_sum",
+                        "ad", "p_buy", "p_ord")}
+    no_cost = []
+    rows = []
+    for nm, c in P.items():
+        cost = cost_of(nm, c["art"])
+        ad = ad_nm.get(nm, {}).get("sum", 0)
+        ratio = (c["ratio_f"] / c["ratio_p"]) if c["ratio_p"] else glob_ratio
+        net_qty = c["buy"] - c["ret"]
+        # Выкуптан нақты пайда: WB аударатын сома − себестоимость − логистика − жарнама
+        p_buy = (c["buy_pay"] - c["ret_pay"]) - (cost or 0) * net_qty - logi * c["buy"] - ad
+        # Заказдан күтілетін пайда (бәрі сатып алынса)
+        p_ord = c["ord_sum"] * ratio - (cost or 0) * c["ord"] - logi * c["ord"] - ad
+        if cost is None and (c["buy"] or c["ord"]):
+            no_cost.append(c["art"] or str(nm))
+        rows.append((nm, c, ad, p_buy, p_ord, cost))
+        for k in ("ord", "ord_sum", "cancel", "buy", "buy_sum", "ret", "ret_sum"):
+            T[k] += c[k]
+        T["ad"] += ad
+        T["p_buy"] += p_buy
+        T["p_ord"] += p_ord
+    # Тапсырысы жоқ, бірақ жарнамасы бар карточкалар
+    for nm, a in ad_nm.items():
+        if nm not in P and a["sum"] > 0:
+            rows.append((nm, {"art": "", "subject": a.get("name", ""), "ord": 0, "ord_sum": 0,
+                              "cancel": 0, "buy": 0, "buy_sum": 0, "ret": 0, "ret_sum": 0},
+                         a["sum"], -a["sum"], -a["sum"], cost_of(nm, "")))
+            T["ad"] += a["sum"]
+            T["p_buy"] -= a["sum"]
+            T["p_ord"] -= a["sum"]
+
+    period = f"{d1:%d.%m.%Y}" if d1 == d2 else f"{d1:%d.%m}–{d2:%d.%m.%Y}"
+    L = [f"<b>{escape(title)}</b>", f"🗓 {period}", ""]
+    if ords is None or sales is None:
+        L.append("⚠️ WB кейбір деректі бермеді (лимит) — сандар толық емес болуы мүмкін\n")
+    buy_rate = pct(T["buy"], T["buy"] + T["ret"]) if (T["buy"] + T["ret"]) else "—"
+    L += [f"🛒 Тапсырыс: <b>{T['ord']} дана / {m(T['ord_sum'])}</b>",
+          f"❌ Отмена (тапсырыстан бас тарту): {T['cancel']} дана",
+          f"✅ Выкуп: <b>{T['buy']} дана / {m(T['buy_sum'])}</b>",
+          f"↩️ Отказ / қайтару: {T['ret']} дана / {m(T['ret_sum'])}",
+          f"📈 Выкуп пайызы: {buy_rate}",
+          f"💸 Жарнама: {m(T['ad'])}",
+          "",
+          f"💰 <b>Выкуптан пайда: {m(T['p_buy'])}</b>",
+          f"📦 Заказдан күтілетін пайда: {m(T['p_ord'])}",
+          ""]
+
+    rows.sort(key=lambda r: (-r[1]["ord"], -r[1]["buy"], -r[2]))
+    L.append("<b>📦 Артикул бойынша:</b>")
+    for nm, c, ad, p_buy, p_ord, cost in rows[:CFG.get("top_cards_sales", 25)]:
+        name = NAMES.get(nm) or c["art"] or c["subject"] or str(nm)
+        L.append(f"\n<b>{escape(name[:32])}</b> (арт. {nm})")
+        L.append(f"   🛒 Заказ {c['ord']} · ❌ отмена {c['cancel']} · ✅ выкуп {c['buy']}"
+                 f" · ↩️ отказ {c['ret']}")
+        if c["buy_sum"]:
+            L.append(f"   💵 Выкуп сомасы: {m(c['buy_sum'])}")
+        if ad:
+            L.append(f"   💸 Жарнама: {m(ad)}")
+        L.append(f"   💰 Пайда: выкуптан {m(p_buy)} · заказдан {m(p_ord)}"
+                 + ("" if cost is not None else " ⚠️"))
+    if len(rows) > CFG.get("top_cards_sales", 25):
+        L.append(f"\n…тағы {len(rows) - CFG.get('top_cards_sales', 25)} артикул")
+
+    L += ["", "<i>Пайда = WB аударатын сома − себестоимость − логистика − жарнама.</i>"]
+    if no_cost:
+        L.append(f"⚠️ Себестоимость енгізілмеген ({len(no_cost)}): "
+                 + escape(", ".join(no_cost[:10])) + (" …" if len(no_cost) > 10 else "")
+                 + " — бұларда пайда себестоимостьсыз есептелді.")
+    return "\n".join(L)
+
+
 # ---------------------------------------------------------------- main
 def target_time(now):
     """Есеп қай :00-ге арналған. Cron :50-де іске қосылады.
@@ -400,6 +536,11 @@ def main():
     bal = balance()
     ords = orders_since(d_from)
     rate = rub_rate()
+    sales = None
+    sale_modes = [md for md in modes if md in ("daily", "weekly")]
+    if sale_modes:
+        time.sleep(62)  # статистика API лимиті: минутына 1 сұраныс
+        sales = sales_since(min(periods[md][0] for md in sale_modes))
 
     # Дәл :00-ді күтеміз
     wait = (send_at - datetime.now(TZ)).total_seconds()
@@ -410,6 +551,10 @@ def main():
     for md in modes:
         d1, d2, label = periods[md]
         tg(build(md, label, d1, d2, camps, stats, ords, rate, bal, send_at))
+        if md in ("daily", "weekly"):
+            title = "🧾 Күндік сауда есебі (кеше)" if md == "daily" else "🧾 Апталық сауда есебі (Дс–Жс)"
+            time.sleep(1)
+            tg(build_sales(title, d1, d2, camps, stats, ords, sales, rate))
 
 
 if __name__ == "__main__":

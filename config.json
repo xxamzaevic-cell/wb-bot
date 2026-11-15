@@ -17,8 +17,15 @@
     "275466842": "Колонка К12 2 мик",
     "160474343": "Пульт LG"
   },
-  "must_be_active": [38520553, 38520543],
+  "must_be_active": [
+    38520553,
+    38520543
+  ],
   "alert_zero_orders_spend": 3000,
   "alert_low_balance": 20000,
-  "rub_to_kzt_fallback": 6.3
+  "rub_to_kzt_fallback": 6.3,
+  "cost_price": {},
+  "logistics_per_unit": 0,
+  "default_forpay_ratio": 0.7,
+  "top_cards_sales": 25
 }
