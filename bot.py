@@ -27,8 +27,18 @@ with open(os.path.join(HERE, "config.json"), encoding="utf-8") as f:
     CFG = json.load(f)
 
 TZ = timezone(timedelta(hours=CFG.get("utc_offset", 5)))
-MAX_CPO = {int(k): v for k, v in CFG.get("max_cpo", {}).items()}
+MAX_CPO = {int(k): v for k, v in CFG.get("max_cpo_campaign", {}).items()}
 NAMES = {int(k): v for k, v in CFG.get("product_names", {}).items()}
+CNAMES = {int(k): v for k, v in CFG.get("campaign_names", {}).items()}
+
+
+def rub_rate():
+    """Статистика API бағаны рубльмен береді → теңгеге айналдыру курсы."""
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/RUB", timeout=20).json()
+        return float(r["rates"]["KZT"])
+    except Exception:
+        return float(CFG.get("rub_to_kzt_fallback", 6.3))
 
 
 # ---------------------------------------------------------------- HTTP
@@ -78,15 +88,19 @@ def campaigns():
         if grp.get("status") not in (9, 11):
             continue
         for a in grp.get("advert_list", []) or []:
-            res[a["advertId"]] = {"name": str(a["advertId"]), "status": grp["status"]}
-    ids = list(res)
+            cid = a["advertId"]
+            res[cid] = {"name": CNAMES.get(cid, str(cid)), "status": grp["status"]}
+    ids = [i for i in res if i not in CNAMES]
     for i in range(0, len(ids), 50):
         try:
-            info = wb("POST", f"{ADV}/adv/v1/promotion/adverts", json=ids[i:i + 50]) or []
-            for a in info:
-                if a.get("advertId") in res:
-                    res[a["advertId"]]["name"] = a.get("name") or res[a["advertId"]]["name"]
-        except requests.HTTPError:
+            info = wb("GET", f"{ADV}/api/advert/v2/adverts",
+                      params={"ids": ",".join(map(str, ids[i:i + 50]))}) or {}
+            for a in info.get("adverts", info if isinstance(info, list) else []):
+                cid = a.get("id") or a.get("advertId")
+                nm = (a.get("settings") or {}).get("name") or a.get("name")
+                if cid in res and nm:
+                    res[cid]["name"] = nm
+        except Exception:
             pass
     return res
 
@@ -153,11 +167,11 @@ def agg_campaigns(stats, camps):
     return by_camp, by_nm
 
 
-def agg_orders(ords):
+def agg_orders(ords, rate):
     tot = {"cnt": 0, "sum": 0, "cancel": 0}
     by_nm = {}
     for o in ords:
-        price = o.get("priceWithDisc") or o.get("finishedPrice") or 0
+        price = (o.get("priceWithDisc") or o.get("finishedPrice") or 0) * rate
         n = by_nm.setdefault(o["nmId"], {"cnt": 0, "sum": 0, "subject": o.get("subject", "")})
         if o.get("isCancel"):
             tot["cancel"] += 1
@@ -185,7 +199,7 @@ def nm_name(nm, fallback=""):
 def build(title, d1, d2, camps, detailed):
     stats = fullstats(list(camps), d1, d2) if camps else []
     by_camp, by_nm = agg_campaigns(stats, camps)
-    tot_o, ord_nm = agg_orders(orders(d1, d2))
+    tot_o, ord_nm = agg_orders(orders(d1, d2), rub_rate())
     bal = balance()
 
     spend = sum(c["sum"] for c in by_camp.values())
@@ -223,10 +237,10 @@ def build(title, d1, d2, camps, detailed):
 
     # Ескертулер
     W = []
-    for nm, lim in MAX_CPO.items():
-        a = by_nm.get(nm)
-        if a and a["orders"] and a["sum"] / a["orders"] > lim:
-            W.append(f"🔴 {escape(nm_name(nm))}: CPO {m(a['sum'] / a['orders'])} > шек {m(lim)}")
+    for cid, lim in MAX_CPO.items():
+        c = by_camp.get(cid)
+        if c and c["orders"] and c["sum"] / c["orders"] > lim:
+            W.append(f"🔴 {escape(c['name'][:28])}: CPO {m(c['sum'] / c['orders'])} > шек {m(lim)}")
     min_spend = CFG.get("alert_zero_orders_spend", 3000)
     for c in rows:
         if c["orders"] == 0 and c["sum"] >= min_spend:
