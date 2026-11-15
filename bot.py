@@ -577,18 +577,22 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
 
 
 def finance_job(md, d1, d2, camps, ords, costs, force=False):
-    """Қаржы есебі дайын болса жібереді. True — жіберілді."""
+    """Қаржы есебі WB-да ТОЛЫҚ дайын болса ғана жібереді. True — жіберілді.
+    Дайын болмаса ештеңе жібермейді, келесі сағатта қайта тексереді."""
+    if ords is None:
+        print(f"{md}: тапсырыс деректері жоқ (WB лимиті) — келесі сағатта")
+        return False
     period = "daily" if md == "daily" else "weekly"
     reports = fin_list(d1, d2, period)
     reports = [r for r in reports if str(r.get("dateFrom", ""))[:10] >= d1.isoformat()
                and str(r.get("dateTo", ""))[:10] <= d2.isoformat()]
-    if not reports and not force:
+    if not reports:
         print(f"{md}: WB қаржы есебі әлі дайын емес")
         return False
     time.sleep(62)
     rows = fin_detail(d1, d2, period)
-    if not reports and not rows:
-        tg(f"🧾 {d1:%d.%m}–{d2:%d.%m} қаржы есебін WB әлі жасамаған. Дайын болғанда бот өзі жібереді.")
+    if not rows:
+        print(f"{md}: детализация әлі бос")
         return False
     try:
         stats = fullstats(list(camps), d1, d2) if camps else []
