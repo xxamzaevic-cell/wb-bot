@@ -23,8 +23,20 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests==2.32.3
+      # Қаржы есебі қайта-қайта жіберілмеуі үшін күйді сақтаймыз
+      - uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: wb-state-${{ github.run_id }}
+          restore-keys: wb-state-
       - run: python bot.py ${{ github.event.inputs.mode || 'auto' }}
         env:
           WB_TOKEN: ${{ secrets.WB_TOKEN }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          COSTS_CSV: ${{ secrets.COSTS_CSV }}
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state
+          key: wb-state-${{ github.run_id }}
