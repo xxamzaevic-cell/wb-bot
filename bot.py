@@ -348,7 +348,7 @@ def build(kind, label, d1, d2, camps, stats, ords, rate, bal, send_at):
 # ---------------------------------------------------------------- қаржы есебі (WB finance API)
 FIN = "https://finance-api.wildberries.ru"
 VAT_RATE = float(CFG.get("vat_rate", 16))          # ИП НДС төлеушісі
-VAT_K = VAT_RATE / (100 + VAT_RATE)
+TAX_K = VAT_RATE / 100                              # пайдадан 16%
 STATE_FILE = os.path.join(HERE, "state", "state.json")
 
 
@@ -487,14 +487,15 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
         cost = (cost_u or 0) * net_q
         ad = ad_nm.get(nm, {}).get("sum", 0)
         itog = c["pay"] - c["logi"] - c["stor"] - c["pen"] - c["ded"] - c["acc"] + c["add"]
-        vat = c["retail"] * VAT_K          # НДС бағаның ішінде: 16/116
-        profit = itog - cost - ad - vat
+        p0 = itog - cost - ad
+        profit = p0 - max(p0, 0) * TAX_K    # пайдадан 16% (пайда оң болса)
         # заказдан болжам: 1 сатылымның таза түсімі × тапсырыс саны
         n_ord = o_cnt.get(nm, 0)
         forecast = None
         if n_ord and c["sold"]:
-            per_u = (c["pay"] - c["logi"] - c["retail"] * VAT_K) / max(c["sold"], 1) - (cost_u or 0)
-            forecast = per_u * n_ord - ad
+            per_u = (c["pay"] - c["logi"]) / max(c["sold"], 1) - (cost_u or 0)
+            f0 = per_u * n_ord - ad
+            forecast = f0 - max(f0, 0) * TAX_K
         for x in ("sold", "ret", "otkaz", "retail", "pay", "logi", "stor", "pen", "ded", "acc", "add"):
             T[x] += c[x]
         T["cost"] += cost
@@ -506,8 +507,8 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
     bank = sum(num(r.get("bankPaymentSum")) for r in reports) * k if reports else None
     itog = bank if bank is not None else itog_calc
     # жарнама ұстаулармен қосарланбауы үшін
-    vat_total = T["retail"] * VAT_K
     profit_before = itog - T["cost"] - T["ad"] + ad_ded
+    vat_total = max(profit_before, 0) * TAX_K
     profit_total = profit_before - vat_total
 
     period = f"{d1:%d.%m.%Y}" if d1 == d2 else f"{d1:%d.%m}–{d2:%d.%m.%Y}"
@@ -536,8 +537,9 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
           f"📦 Себестоимость: −{m(T['cost'])}",
           f"📢 Жарнама: −{m(T['ad'])}" + (f" (оның {m(ad_ded)} ұстауларда бар, қайта алынбады)" if ad_ded else ""),
           f"💰 Пайда (салыққа дейін): {m(profit_before)}",
-          f"🧾 НДС {VAT_RATE:g}% (сатылым сомасынан, бағаның ішінде): −{m(vat_total)}",
-          f"💰 <b>Таза пайда (НДС-тан кейін): {m(profit_total)}</b>"]
+          f"🧾 Салық {VAT_RATE:g}% (пайдадан): −{m(vat_total)}",
+
+          f"💰 <b>Таза пайда (16%-дан кейін): {m(profit_total)}</b>"]
     if T["retail"]:
         L.append(f"📊 Маржа: {pct(profit_total, T['retail'])}")
     fc = sum(x[8] for x in lines if x[8] is not None)
@@ -565,7 +567,7 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
         if ad: costs_line.append(f"жарнама {m(ad)}")
         if costs_line:
             L.append("   ➖ " + " · ".join(costs_line))
-        L.append(f"   💰 Таза пайда (НДС-тан кейін): <b>{m(profit)}</b>" + (" ⚠️себест. жоқ" if cost_u is None and c["sold"] else "")
+        L.append(f"   💰 Таза пайда (16%-дан кейін): <b>{m(profit)}</b>" + (" ⚠️себест. жоқ" if cost_u is None and c["sold"] else "")
                  + (f" · заказдан болжам {m(fcst)}" if fcst is not None else ""))
     rest = [x for x in lines[top:] if x[0]]
     if rest:
