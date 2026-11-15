@@ -1,0 +1,15 @@
+{
+  "utc_offset": 5,
+  "daily_hour": 9,
+  "max_cpo": {
+    "275466842": 280,
+    "160474343": 450
+  },
+  "product_names": {
+    "275466842": "Колонка К12 2 мик",
+    "160474343": "Пульт LG"
+  },
+  "must_be_active": [38520553, 38520543],
+  "alert_zero_orders_spend": 3000,
+  "alert_low_balance": 20000
+}
