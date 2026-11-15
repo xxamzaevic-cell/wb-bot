@@ -2,8 +2,8 @@
 
 Режимдер (автоматты түрде жергілікті уақытқа қарай):
   hourly  – әр сағат дәл :00-де: бүгінгі шығын, тапсырыс, әр карточка бойынша
-  daily   – күн сайын 09:00: кешегі толық есеп
-  weekly  – дүйсенбі 09:00: өткен аптаның (Дс–Жс) есебі
+  daily   – күн сайын 09:00: кешегі жарнама есебі + WB қаржы есебі (дайын болғанда)
+  weekly  – дүйсенбі: өткен аптаның жарнама + қаржы есебі
 Қолмен: python bot.py hourly|daily|weekly  (күтпей бірден жібереді)
 
 Ескерту: WB күнді Мәскеу уақытымен санайды (Шымкентте 02:00-де басталады),
@@ -345,140 +345,259 @@ def build(kind, label, d1, d2, camps, stats, ords, rate, bal, send_at):
     return "\n".join(L)
 
 
-# ---------------------------------------------------------------- сауда / пайда
-def sales_since(d1):
-    """Сатып алулар (S...) және қайтарулар/отказдар (R...) d1-ден бастап."""
+# ---------------------------------------------------------------- қаржы есебі (WB finance API)
+FIN = "https://finance-api.wildberries.ru"
+STATE_FILE = os.path.join(HERE, "state", "state.json")
+
+
+def load_state():
     try:
-        return wb("GET", f"{STAT}/api/v1/supplier/sales",
-                  params={"dateFrom": d1.isoformat(), "flag": 0},
-                  tries=5, max_wait=70) or []
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        return None
+        return {}
 
 
-def cost_of(nm, art):
-    """Себестоимость (₸) config.json → cost_price: nmId немесе артикул бойынша."""
-    cp = CFG.get("cost_price", {})
-    v = cp.get(str(nm))
-    if v is None and art:
-        v = cp.get(art)
-    return v
+def save_state(st):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(st, f)
 
 
-def build_sales(title, d1, d2, camps, stats, ords, sales, rate):
-    _, ad_nm = agg_ads(stats, camps, d1, d2)
-    logi = CFG.get("logistics_per_unit", 0)
-    def_ratio = CFG.get("default_forpay_ratio", 0.7)
+def load_costs():
+    """Себестоимость: GitHub Secret COSTS_CSV (жасырын), болмаса costs.csv.
+    Формат: nmId;cost (₸ / дана), әр жолда бір артикул."""
+    res = {}
+    try:
+        text = os.environ.get("COSTS_CSV", "").strip()
+        if not text:
+            with open(os.path.join(HERE, "costs.csv"), encoding="utf-8") as f:
+                text = f.read()
+        for line in text.splitlines():
+            if True:
+                parts = [p.strip() for p in line.strip().replace("\t", ";").split(";")]
+                if len(parts) < 2 or not parts[0].isdigit() or not parts[1]:
+                    continue
+                try:
+                    res[parts[0]] = float(parts[1].replace(",", ".").replace(" ", ""))
+                except ValueError:
+                    pass
+    except FileNotFoundError:
+        pass
+    for k, v in CFG.get("cost_price", {}).items():
+        res[str(k)] = float(v)
+    return res
 
-    P = {}  # nmId → көрсеткіштер
 
-    def card(nm, row):
-        return P.setdefault(nm, {"art": row.get("supplierArticle", ""),
-                                 "subject": row.get("subject", ""),
-                                 "ord": 0, "ord_sum": 0, "cancel": 0,
-                                 "buy": 0, "buy_sum": 0, "buy_pay": 0,
-                                 "ret": 0, "ret_sum": 0, "ret_pay": 0,
-                                 "ratio_p": 0, "ratio_f": 0})
+def num(x):
+    """finance API ақшаны жол (string) ретінде береді."""
+    try:
+        return float(x or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
+
+def fin_list(d1, d2, period):
+    """Есептер тізімі (ресми жиынтықтар: bankPaymentSum = Итого к оплате)."""
+    return wb("POST", f"{FIN}/api/finance/v1/sales-reports/list",
+              json={"dateFrom": d1.isoformat(), "dateTo": d2.isoformat(),
+                    "period": period, "limit": 1000}, tries=3) or []
+
+
+def fin_detail(d1, d2, period):
+    """Есеп детализациясы, бөліктерімен (rrdId). Лимит: минутына 1 сұраныс."""
+    rows, rrd = [], 0
+    while True:
+        part = wb("POST", f"{FIN}/api/finance/v1/sales-reports/detailed",
+                  json={"dateFrom": d1.isoformat(), "dateTo": d2.isoformat(),
+                        "period": period, "limit": 100000, "rrdId": rrd}, tries=3)
+        if not part:
+            break
+        rows.extend(part)
+        if len(part) < 100000:
+            break
+        rrd = part[-1]["rrdId"]
+        time.sleep(62)
+    return rows
+
+
+AD_WORDS = ("продвижен", "реклам", "вб.продв")
+
+
+def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
+    cur = (reports[0].get("currency") if reports else None) or (rows[0].get("currency") if rows else "KZT")
+    k = 1.0 if cur == "KZT" else rub_rate()   # бәрін ₸-ге келтіреміз
+
+    def card(nm, r):
+        return P.setdefault(nm, {"art": r.get("vendorCode", ""), "name": r.get("subjectName", ""),
+                                 "sold": 0, "ret": 0, "otkaz": 0, "retail": 0, "pay": 0,
+                                 "logi": 0, "stor": 0, "pen": 0, "ded": 0, "acc": 0, "add": 0})
+
+    P = {}
+    ded_types = {}
+    ad_ded = 0.0
+    for r in rows:
+        nm = r.get("nmId") or 0
+        c = card(nm, r)
+        doc = (r.get("docTypeName") or "").lower()
+        q = r.get("quantity") or 0
+        sign = -1 if doc.startswith("возврат") else 1
+        if doc.startswith("продажа") and q:
+            c["sold"] += q
+        elif doc.startswith("возврат") and q:
+            c["ret"] += q
+        if doc:
+            c["retail"] += sign * num(r.get("retailAmount")) * k
+            c["pay"] += sign * num(r.get("forPay")) * k
+        c["otkaz"] += r.get("returnAmount") or 0
+        c["logi"] += num(r.get("deliveryService")) * k + num(r.get("rebillLogisticCost")) * k
+        c["stor"] += num(r.get("paidStorage")) * k
+        c["pen"] += num(r.get("penalty")) * k
+        c["acc"] += num(r.get("paidAcceptance")) * k
+        c["add"] += num(r.get("additionalPayment")) * k
+        d = num(r.get("deduction")) * k
+        if d:
+            c["ded"] += d
+            bt = (r.get("bonusTypeName") or r.get("sellerOperName") or "Удержание").strip()
+            ded_types[bt] = ded_types.get(bt, 0) + d
+            if any(w in bt.lower() for w in AD_WORDS):
+                ad_ded += d
+
+    # Тапсырыстар (статистика API) — дана саны
+    o_cnt, o_cancel = {}, {}
     for o in ords or []:
         if not (d1 <= order_dt(o).date() <= d2):
             continue
-        c = card(o["nmId"], o)
-        if o.get("isCancel"):
-            c["cancel"] += 1
-        else:
-            c["ord"] += 1
-            c["ord_sum"] += (o.get("priceWithDisc") or 0) * rate
+        tgt = o_cancel if o.get("isCancel") else o_cnt
+        tgt[o["nmId"]] = tgt.get(o["nmId"], 0) + 1
 
-    for s in sales or []:
-        if not (d1 <= order_dt(s).date() <= d2):
-            continue
-        c = card(s["nmId"], s)
-        price = abs(s.get("priceWithDisc") or 0) * rate
-        pay = abs(s.get("forPay") or 0) * rate
-        if str(s.get("saleID", "")).startswith("R"):
-            c["ret"] += 1
-            c["ret_sum"] += price
-            c["ret_pay"] += pay
-        else:
-            c["buy"] += 1
-            c["buy_sum"] += price
-            c["buy_pay"] += pay
-            c["ratio_p"] += price
-            c["ratio_f"] += pay
-
-    tot_p = sum(c["ratio_p"] for c in P.values())
-    glob_ratio = (sum(c["ratio_f"] for c in P.values()) / tot_p) if tot_p else def_ratio
-
-    T = {k: 0 for k in ("ord", "ord_sum", "cancel", "buy", "buy_sum", "ret", "ret_sum",
-                        "ad", "p_buy", "p_ord")}
-    no_cost = []
-    rows = []
-    for nm, c in P.items():
-        cost = cost_of(nm, c["art"])
+    T = {x: 0.0 for x in ("sold", "ret", "otkaz", "retail", "pay", "logi", "stor", "pen",
+                          "ded", "acc", "add", "cost", "ad", "profit")}
+    no_cost, lines = set(), []
+    all_nm = set(P) | set(o_cnt) | set(nm for nm, a in ad_nm.items() if a["sum"] > 0)
+    for nm in all_nm:
+        c = P.get(nm) or {"art": "", "name": "", "sold": 0, "ret": 0, "otkaz": 0, "retail": 0,
+                          "pay": 0, "logi": 0, "stor": 0, "pen": 0, "ded": 0, "acc": 0, "add": 0}
+        cost_u = costs.get(str(nm)) if nm else None
+        net_q = c["sold"] - c["ret"]
+        if nm and net_q and cost_u is None:
+            no_cost.add(str(nm))
+        cost = (cost_u or 0) * net_q
         ad = ad_nm.get(nm, {}).get("sum", 0)
-        ratio = (c["ratio_f"] / c["ratio_p"]) if c["ratio_p"] else glob_ratio
-        net_qty = c["buy"] - c["ret"]
-        # Выкуптан нақты пайда: WB аударатын сома − себестоимость − логистика − жарнама
-        p_buy = (c["buy_pay"] - c["ret_pay"]) - (cost or 0) * net_qty - logi * c["buy"] - ad
-        # Заказдан күтілетін пайда (бәрі сатып алынса)
-        p_ord = c["ord_sum"] * ratio - (cost or 0) * c["ord"] - logi * c["ord"] - ad
-        if cost is None and (c["buy"] or c["ord"]):
-            no_cost.append(c["art"] or str(nm))
-        rows.append((nm, c, ad, p_buy, p_ord, cost))
-        for k in ("ord", "ord_sum", "cancel", "buy", "buy_sum", "ret", "ret_sum"):
-            T[k] += c[k]
+        itog = c["pay"] - c["logi"] - c["stor"] - c["pen"] - c["ded"] - c["acc"] + c["add"]
+        profit = itog - cost - ad
+        # заказдан болжам: 1 сатылымның таза түсімі × тапсырыс саны
+        n_ord = o_cnt.get(nm, 0)
+        forecast = None
+        if n_ord and c["sold"]:
+            per_u = (c["pay"] - c["logi"]) / max(c["sold"], 1) - (cost_u or 0)
+            forecast = per_u * n_ord - ad
+        for x in ("sold", "ret", "otkaz", "retail", "pay", "logi", "stor", "pen", "ded", "acc", "add"):
+            T[x] += c[x]
+        T["cost"] += cost
         T["ad"] += ad
-        T["p_buy"] += p_buy
-        T["p_ord"] += p_ord
-    # Тапсырысы жоқ, бірақ жарнамасы бар карточкалар
-    for nm, a in ad_nm.items():
-        if nm not in P and a["sum"] > 0:
-            rows.append((nm, {"art": "", "subject": a.get("name", ""), "ord": 0, "ord_sum": 0,
-                              "cancel": 0, "buy": 0, "buy_sum": 0, "ret": 0, "ret_sum": 0},
-                         a["sum"], -a["sum"], -a["sum"], cost_of(nm, "")))
-            T["ad"] += a["sum"]
-            T["p_buy"] -= a["sum"]
-            T["p_ord"] -= a["sum"]
+        T["profit"] += profit
+        lines.append((nm, c, n_ord, o_cancel.get(nm, 0), itog, cost, ad, profit, forecast, cost_u))
+
+    itog_calc = T["pay"] - T["logi"] - T["stor"] - T["pen"] - T["ded"] - T["acc"] + T["add"]
+    bank = sum(num(r.get("bankPaymentSum")) for r in reports) * k if reports else None
+    itog = bank if bank is not None else itog_calc
+    # жарнама ұстаулармен қосарланбауы үшін
+    profit_total = itog - T["cost"] - T["ad"] + ad_ded
 
     period = f"{d1:%d.%m.%Y}" if d1 == d2 else f"{d1:%d.%m}–{d2:%d.%m.%Y}"
-    L = [f"<b>{escape(title)}</b>", f"🗓 {period}", ""]
-    if ords is None or sales is None:
-        L.append("⚠️ WB кейбір деректі бермеді (лимит) — сандар толық емес болуы мүмкін\n")
-    buy_rate = pct(T["buy"], T["buy"] + T["ret"]) if (T["buy"] + T["ret"]) else "—"
-    L += [f"🛒 Тапсырыс: <b>{T['ord']} дана / {m(T['ord_sum'])}</b>",
-          f"❌ Отмена (тапсырыстан бас тарту): {T['cancel']} дана",
-          f"✅ Выкуп: <b>{T['buy']} дана / {m(T['buy_sum'])}</b>",
-          f"↩️ Отказ / қайтару: {T['ret']} дана / {m(T['ret_sum'])}",
-          f"📈 Выкуп пайызы: {buy_rate}",
-          f"💸 Жарнама: {m(T['ad'])}",
+    L = [f"<b>{escape(title)}</b>", f"🗓 {period} · WB қаржы есебі бойынша", ""]
+    L += [f"🛒 Тапсырыс: <b>{sum(o_cnt.values())} дана</b> · ❌ отмена {sum(o_cancel.values())}",
+          f"✅ Выкуп (сатылды): <b>{int(T['sold'])} дана</b> · ↩️ қайтару {int(T['ret'])} · "
+          f"🚫 отказ {int(T['otkaz'])}",
           "",
-          f"💰 <b>Выкуптан пайда: {m(T['p_buy'])}</b>",
-          f"📦 Заказдан күтілетін пайда: {m(T['p_ord'])}",
-          ""]
+          "<b>💵 Ақша (WB-мен бірдей):</b>",
+          f"Сатылым сомасы: {m(T['retail'])}",
+          f"WB комиссиясы + эквайринг: −{m(T['retail'] - T['pay'])}",
+          f"Логистика: −{m(T['logi'])}",
+          f"Сақтау (хранение): −{m(T['stor'])}",
+          f"Айыппұл (штраф): −{m(T['pen'])}",
+          f"Ұстаулар (удержания): −{m(T['ded'])}",
+          f"Платная приёмка: −{m(T['acc'])}"]
+    if T["add"]:
+        L.append(f"Қосымша төлем (доплата): +{m(T['add'])}")
+    L.append(f"<b>Итого к оплате: {m(itog)}</b>")
+    if bank is not None and abs(bank - itog_calc) > 1:
+        L.append(f"<i>(жолдар бойынша есептегенде {m(itog_calc)}, айырма WB есебіндегі басқа операциялар)</i>")
+    if ded_types:
+        L.append("Ұстаулар ішінде: " + "; ".join(f"{escape(n[:40])} {m(v)}" for n, v in
+                                                  sorted(ded_types.items(), key=lambda x: -x[1])[:5]))
+    L += ["",
+          f"📦 Себестоимость: −{m(T['cost'])}",
+          f"📢 Жарнама: −{m(T['ad'])}" + (f" (оның {m(ad_ded)} ұстауларда бар, қайта алынбады)" if ad_ded else ""),
+          f"💰 <b>Таза пайда: {m(profit_total)}</b>"]
+    if T["retail"]:
+        L.append(f"📊 Маржа: {pct(profit_total, T['retail'])}")
+    fc = sum(x[8] for x in lines if x[8] is not None)
+    if fc:
+        L.append(f"🔮 Заказдан күтілетін пайда (болжам): {m(fc)}")
 
-    rows.sort(key=lambda r: (-r[1]["ord"], -r[1]["buy"], -r[2]))
-    L.append("<b>📦 Артикул бойынша:</b>")
-    for nm, c, ad, p_buy, p_ord, cost in rows[:CFG.get("top_cards_sales", 25)]:
-        name = NAMES.get(nm) or c["art"] or c["subject"] or str(nm)
+    lines.sort(key=lambda x: (-(x[1]["sold"]), -x[2]))
+    L += ["", "<b>📦 Артикул бойынша:</b>"]
+    top = CFG.get("top_cards_sales", 25)
+    for nm, c, n_ord, n_can, it, cost, ad, profit, fcst, cost_u in lines[:top]:
+        if not nm:
+            continue
+        name = NAMES.get(nm) or c["art"] or c["name"] or str(nm)
         L.append(f"\n<b>{escape(name[:32])}</b> (арт. {nm})")
-        L.append(f"   🛒 Заказ {c['ord']} · ❌ отмена {c['cancel']} · ✅ выкуп {c['buy']}"
-                 f" · ↩️ отказ {c['ret']}")
-        if c["buy_sum"]:
-            L.append(f"   💵 Выкуп сомасы: {m(c['buy_sum'])}")
-        if ad:
-            L.append(f"   💸 Жарнама: {m(ad)}")
-        L.append(f"   💰 Пайда: выкуптан {m(p_buy)} · заказдан {m(p_ord)}"
-                 + ("" if cost is not None else " ⚠️"))
-    if len(rows) > CFG.get("top_cards_sales", 25):
-        L.append(f"\n…тағы {len(rows) - CFG.get('top_cards_sales', 25)} артикул")
-
-    L += ["", "<i>Пайда = WB аударатын сома − себестоимость − логистика − жарнама.</i>"]
+        L.append(f"   🛒 заказ {n_ord} · ❌ отмена {n_can} · ✅ выкуп {c['sold']} · ↩️ қайтару {c['ret']}"
+                 + (f" · 🚫 отказ {c['otkaz']}" if c["otkaz"] else ""))
+        if c["retail"]:
+            L.append(f"   💵 Сатылым {m(c['retail'])} → WB аударады {m(c['pay'])}")
+        costs_line = []
+        if c["logi"]: costs_line.append(f"логистика {m(c['logi'])}")
+        if c["stor"]: costs_line.append(f"сақтау {m(c['stor'])}")
+        if c["pen"]: costs_line.append(f"штраф {m(c['pen'])}")
+        if c["ded"]: costs_line.append(f"ұстау {m(c['ded'])}")
+        if cost: costs_line.append(f"себест. {m(cost)}")
+        if ad: costs_line.append(f"жарнама {m(ad)}")
+        if costs_line:
+            L.append("   ➖ " + " · ".join(costs_line))
+        L.append(f"   💰 Пайда: <b>{m(profit)}</b>" + (" ⚠️себест. жоқ" if cost_u is None and c["sold"] else "")
+                 + (f" · заказдан болжам {m(fcst)}" if fcst is not None else ""))
+    rest = [x for x in lines[top:] if x[0]]
+    if rest:
+        L.append(f"\n…тағы {len(rest)} артикул, пайдасы {m(sum(x[7] for x in rest))}")
+    gen = P.get(0)
+    if gen and (gen["stor"] or gen["pen"] or gen["ded"] or gen["acc"] or gen["logi"]):
+        L.append(f"\n🏷 Артикулсыз шығындар: сақтау {m(gen['stor'])}, штраф {m(gen['pen'])}, "
+                 f"ұстау {m(gen['ded'])}, логистика {m(gen['logi'])}, приёмка {m(gen['acc'])}")
     if no_cost:
-        L.append(f"⚠️ Себестоимость енгізілмеген ({len(no_cost)}): "
-                 + escape(", ".join(no_cost[:10])) + (" …" if len(no_cost) > 10 else "")
-                 + " — бұларда пайда себестоимостьсыз есептелді.")
+        L.append(f"\n⚠️ Себестоимость жоқ артикулдар ({len(no_cost)}): "
+                 + ", ".join(sorted(no_cost)[:15]) + (" …" if len(no_cost) > 15 else "")
+                 + " — пайда себестоимостьсыз есептелді")
+    if cur != "KZT":
+        L.append(f"<i>WB есебі {escape(cur)} валютасында, ₸-ге {k:.2f} курсымен айналдырылды</i>")
     return "\n".join(L)
+
+
+def finance_job(md, d1, d2, camps, ords, costs, force=False):
+    """Қаржы есебі дайын болса жібереді. True — жіберілді."""
+    period = "daily" if md == "daily" else "weekly"
+    reports = fin_list(d1, d2, period)
+    reports = [r for r in reports if str(r.get("dateFrom", ""))[:10] >= d1.isoformat()
+               and str(r.get("dateTo", ""))[:10] <= d2.isoformat()]
+    if not reports and not force:
+        print(f"{md}: WB қаржы есебі әлі дайын емес")
+        return False
+    time.sleep(62)
+    rows = fin_detail(d1, d2, period)
+    if not reports and not rows:
+        tg(f"🧾 {d1:%d.%m}–{d2:%d.%m} қаржы есебін WB әлі жасамаған. Дайын болғанда бот өзі жібереді.")
+        return False
+    try:
+        stats = fullstats(list(camps), d1, d2) if camps else []
+    except Exception:
+        stats = []
+    _, ad_nm = agg_ads(stats, camps, d1, d2)
+    title = "🧾 Күндік қаржы есебі" if md == "daily" else "🧾 Апталық қаржы есебі (Дс–Жс)"
+    tg(build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs))
+    return True
 
 
 # ---------------------------------------------------------------- main
@@ -506,28 +625,40 @@ def main():
             return
         modes = ["hourly"]
         if send_at.hour == CFG.get("daily_hour", 9):
-            modes.append("daily")
+            modes.append("ads_daily")
             if send_at.weekday() == 0:
-                modes.append("weekly")
+                modes.append("ads_weekly")
 
-    # WB күні (Мәскеу) — есеп жіберілетін сәттегі
-    today = send_at.astimezone(MSK).date()
-    periods = {}
+    today = send_at.astimezone(MSK).date()          # WB күні
+    yday = today - timedelta(days=1)
+    last_mon = today - timedelta(days=today.weekday() + 7)
+    last_sun = last_mon + timedelta(days=6)
+
+    # --- Жарнама есептері (бұрынғыдай)
+    ad_periods = {}
     for md in modes:
         if md == "hourly":
-            periods[md] = (today, today, f"⏱ Сағаттық есеп — {send_at:%H:%M}")
-        elif md == "daily":
-            y = today - timedelta(days=1)
-            periods[md] = (y, y, "📅 Күндік есеп (кеше)")
-        elif md == "weekly":
-            mon = today - timedelta(days=today.weekday() + 7)
-            periods[md] = (mon, mon + timedelta(days=6), "📈 Апталық есеп (Дс–Жс)")
+            ad_periods[md] = (today, today, f"⏱ Сағаттық есеп — {send_at:%H:%M}")
+        elif md in ("ads_daily", "daily"):
+            ad_periods[md] = (yday, yday, "📅 Күндік жарнама есебі (кеше)")
+        elif md in ("ads_weekly", "weekly"):
+            ad_periods[md] = (last_mon, last_sun, "📈 Апталық жарнама есебі (Дс–Жс)")
         else:
             raise SystemExit(f"Белгісіз режим: {md}")
 
-    # Барлық деректі :00-ге дейін алдын ала жинаймыз (әр API-ге бір-бір сұраныс)
-    d_from = min(p[0] for p in periods.values())
-    d_to = max(p[1] for p in periods.values())
+    # Қаржы есебі қажет пе? (күніне/аптасына бір рет, state арқылы)
+    st = load_state()
+    fin_jobs = []
+    if arg in ("daily", "weekly"):
+        fin_jobs.append((arg, *((yday, yday) if arg == "daily" else (last_mon, last_sun)), True))
+    elif not arg and CFG.get("daily_hour", 9) <= send_at.hour <= 23:
+        if st.get("daily_done") != yday.isoformat():
+            fin_jobs.append(("daily", yday, yday, False))
+        if send_at.weekday() <= 2 and st.get("weekly_done") != last_mon.isoformat():
+            fin_jobs.append(("weekly", last_mon, last_sun, False))
+
+    d_from = min([p[0] for p in ad_periods.values()] + [j[1] for j in fin_jobs])
+    d_to = max(p[1] for p in ad_periods.values())
     camps = campaigns()
     try:
         stats = fullstats(list(camps), d_from, d_to) if camps else []
@@ -536,25 +667,37 @@ def main():
     bal = balance()
     ords = orders_since(d_from)
     rate = rub_rate()
-    sales = None
-    sale_modes = [md for md in modes if md in ("daily", "weekly")]
-    if sale_modes:
-        time.sleep(62)  # статистика API лимиті: минутына 1 сұраныс
-        sales = sales_since(min(periods[md][0] for md in sale_modes))
 
-    # Дәл :00-ді күтеміз
     wait = (send_at - datetime.now(TZ)).total_seconds()
     if wait > 0:
         print(f"Деректер дайын, {send_at:%H:%M}-ге дейін {wait:.0f} с күтеміз")
         time.sleep(wait)
 
-    for md in modes:
-        d1, d2, label = periods[md]
-        tg(build(md, label, d1, d2, camps, stats, ords, rate, bal, send_at))
-        if md in ("daily", "weekly"):
-            title = "🧾 Күндік сауда есебі (кеше)" if md == "daily" else "🧾 Апталық сауда есебі (Дс–Жс)"
-            time.sleep(1)
-            tg(build_sales(title, d1, d2, camps, stats, ords, sales, rate))
+    for md, (d1, d2, label) in ad_periods.items():
+        kind = "hourly" if md == "hourly" else "daily"
+        tg(build(kind, label, d1, d2, camps, stats, ords, rate, bal, send_at))
+
+    # --- Қаржы есебі (:00-ден кейін, WB дайын болса)
+    if fin_jobs:
+        costs = load_costs()
+        for md, d1, d2, force in fin_jobs:
+            try:
+                if finance_job(md, d1, d2, camps, ords, costs, force):
+                    st[f"{md}_done"] = d1.isoformat()
+                    save_state(st)
+            except WBLimit:
+                print(f"{md}: WB лимиті, келесі сағатта қайталаймыз")
+            except requests.HTTPError as e:
+                code = e.response.status_code if e.response is not None else "?"
+                if code in (401, 403):
+                    if st.get("fin_token_warned") != today.isoformat():
+                        tg("⚠️ Қаржы есебі үшін WB токенінде «Финансы» рұқсаты жоқ. "
+                           "WB кабинетінде Финансы санаты бар жаңа токен жасап, GitHub-тағы WB_TOKEN-ді ауыстырыңыз.")
+                        st["fin_token_warned"] = today.isoformat()
+                        save_state(st)
+                else:
+                    print(f"{md}: HTTP {code}")
+            time.sleep(62)
 
 
 if __name__ == "__main__":
