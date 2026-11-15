@@ -44,10 +44,15 @@ def rub_rate():
 # ---------------------------------------------------------------- HTTP
 def wb(method, url, **kw):
     """WB сұранысы: 429 болса күтіп қайталайды."""
-    for attempt in range(4):
+    for attempt in range(6):
         r = requests.request(method, url, headers={"Authorization": WB_TOKEN}, timeout=60, **kw)
         if r.status_code == 429:
-            time.sleep(20 * (attempt + 1))
+            wait = r.headers.get("X-Ratelimit-Retry") or r.headers.get("Retry-After")
+            try:
+                wait = min(float(wait) + 1, 90)
+            except (TypeError, ValueError):
+                wait = 15 * (attempt + 1)
+            time.sleep(wait)
             continue
         if r.status_code == 204:
             return None
@@ -82,7 +87,11 @@ def split_msg(text, limit=3900):
 # ---------------------------------------------------------------- WB data
 def campaigns():
     """Белсенді (9) және тоқтатылған (11) кампаниялар: {id: {'name','status'}}"""
-    data = wb("GET", f"{ADV}/adv/v1/promotion/count") or {}
+    try:
+        data = wb("GET", f"{ADV}/adv/v1/promotion/count") or {}
+    except requests.HTTPError:
+        # Тізім алынбаса — config-тағы кампаниялармен жұмыс істейміз
+        return {cid: {"name": n, "status": None} for cid, n in CNAMES.items()}
     res = {}
     for grp in data.get("adverts", []) or []:
         if grp.get("status") not in (9, 11):
@@ -249,7 +258,7 @@ def build(title, d1, d2, camps, detailed):
         W.append(f"🟡 Жарнама балансы аз: {m(bal)}")
     for cid in CFG.get("must_be_active", []):
         st = camps.get(cid, {}).get("status")
-        if st != 9:
+        if st is not None and st != 9:
             W.append(f"⏸ Кампания {cid} белсенді емес")
     if W:
         L += ["", "<b>⚠️ Ескертулер:</b>"] + W
