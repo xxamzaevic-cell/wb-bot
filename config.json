@@ -1,6 +1,7 @@
 {
   "utc_offset": 5,
   "daily_hour": 9,
+  "top_cards": 15,
   "max_cpo_campaign": {
     "38520553": 280,
     "38520543": 450
