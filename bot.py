@@ -637,6 +637,14 @@ def main():
     yday = today - timedelta(days=1)
     last_mon = today - timedelta(days=today.weekday() + 7)
     last_sun = last_mon + timedelta(days=6)
+    # Қолмен басқа кезеңді алу: "weekly 2026-11-02" (сол аптаның дүйсенбісі) немесе "daily 2026-11-10"
+    if arg and len(sys.argv) > 2:
+        dd = date.fromisoformat(sys.argv[2])
+        if arg == "weekly":
+            last_mon = dd - timedelta(days=dd.weekday())
+            last_sun = last_mon + timedelta(days=6)
+        elif arg == "daily":
+            yday = dd
 
     # --- Жарнама есептері (бұрынғыдай)
     ad_periods = {}
