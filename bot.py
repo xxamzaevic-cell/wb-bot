@@ -453,7 +453,7 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
             c["retail"] += sign * num(r.get("retailPriceWithDisc")) * abs(q or 0) * k
             c["pay"] += sign * num(r.get("forPay")) * k
         c["otkaz"] += r.get("returnAmount") or 0
-        c["logi"] += num(r.get("deliveryService")) * k + num(r.get("rebillLogisticCost")) * k
+        c["logi"] += num(r.get("deliveryService")) * k   # rebillLogisticCost осының ішінде, қайта қоспаймыз
         c["stor"] += num(r.get("paidStorage")) * k
         c["pen"] += num(r.get("penalty")) * k
         c["acc"] += num(r.get("paidAcceptance")) * k
