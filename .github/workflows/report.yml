@@ -2,7 +2,7 @@ name: WB report
 
 on:
   schedule:
-    - cron: "50 * * * *"   # әр сағат :50-де іске қосылады, бот деректі жинап, дәл :00-де жібереді
+    - cron: "30 * * * *"   # әр сағат :30-да іске қосылады, бот деректі жинап, дәл :00-ге дейін күтеді
   workflow_dispatch:
     inputs:
       mode:
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
