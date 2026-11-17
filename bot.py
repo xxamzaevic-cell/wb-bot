@@ -35,6 +35,7 @@ MAX_CPO = {int(k): v for k, v in CFG.get("max_cpo_campaign", {}).items()}
 NAMES = {int(k): v for k, v in CFG.get("product_names", {}).items()}
 CNAMES = {int(k): v for k, v in CFG.get("campaign_names", {}).items()}
 TOP_CARDS = CFG.get("top_cards", 15)
+EVERY = int(CFG.get("report_every_hours", 2))   # сағаттық есеп жиілігі
 
 
 class WBLimit(Exception):
@@ -275,10 +276,10 @@ def build(kind, label, d1, d2, camps, stats, ords, rate, bal, send_at):
         L.append(f"🎯 1 тапсырысқа жарнама: {m(spend / ad_ord)}")
     if kind == "hourly" and have_orders:
         h_end = send_at
-        h_start = h_end - timedelta(hours=1)
+        h_start = h_end - timedelta(hours=EVERY)
         last_h = [o for o in ords if not o.get("isCancel")
                   and h_start <= order_dt(o) < h_end]
-        L.append(f"⏰ Соңғы 1 сағатта ({h_start.astimezone(TZ):%H:%M}–{h_end.astimezone(TZ):%H:%M}): "
+        L.append(f"⏰ Соңғы {EVERY} сағатта ({h_start.astimezone(TZ):%H:%M}–{h_end.astimezone(TZ):%H:%M}): "
                  f"<b>{len(last_h)} тапсырыс</b>")
     if bal is not None:
         L.append(f"💰 Жарнама балансы: {m(bal)}")
@@ -685,7 +686,8 @@ def main():
         modes, send_at = [arg], now
     else:
         send_at = target_time(now)
-        modes = ["hourly"]
+        # Сағаттық есеп әр EVERY сағат сайын (жұп сағаттарда: 10:00, 12:00 ...)
+        modes = ["hourly"] if send_at.hour % EVERY == 0 else []
         if send_at.hour == CFG.get("daily_hour", 9):
             modes.append("ads_daily")
             if send_at.weekday() == 0:
@@ -727,8 +729,11 @@ def main():
         if send_at.weekday() <= 2 and st.get("weekly_done") != last_mon.isoformat():
             fin_jobs.append(("weekly", last_mon, last_sun, False))
 
+    if not ad_periods and not fin_jobs:
+        print(f"{send_at:%H:%M} — бұл сағатта есеп жоқ (әр {EVERY} сағат сайын)")
+        return
     d_from = min([p[0] for p in ad_periods.values()] + [j[1] for j in fin_jobs])
-    d_to = max(p[1] for p in ad_periods.values())
+    d_to = max([p[1] for p in ad_periods.values()] + [j[2] for j in fin_jobs])
     camps = campaigns()
     try:
         stats = fullstats(list(camps), d_from, d_to) if camps else []
