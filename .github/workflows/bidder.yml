@@ -1,0 +1,40 @@
+name: WB bidder
+
+on:
+  schedule:
+    - cron: "5 * * * *"    # әр сағат :05-те
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry (сынақ) / live (шын)"
+        default: "dry"
+
+concurrency:
+  group: wb-bidder
+  cancel-in-progress: false
+
+jobs:
+  bid:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests==2.32.3
+      - uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: wb-bidder-${{ github.run_id }}
+          restore-keys: wb-bidder-
+      - run: python bidder.py ${{ github.event.inputs.mode }}
+        env:
+          WB_BID_TOKEN: ${{ secrets.WB_BID_TOKEN }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state
+          key: wb-bidder-${{ github.run_id }}
