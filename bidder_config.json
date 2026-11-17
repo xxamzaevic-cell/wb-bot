@@ -1,0 +1,24 @@
+{
+  "dry_run": true,
+  "advert_id": 38520553,
+  "nm_id": 275466842,
+  "clusters": [
+    "микрофон для детей",
+    "караоке-микрофон",
+    "колонка с микрофоном",
+    "колонка караоке с 2 микрофонами",
+    "колонка с 2 микрофоном"
+  ],
+  "max_cpo_tg": 1000,
+  "cpo_days": 7,
+  "first_place_max_pos": 1.5,
+  "min_views_for_decision": 30,
+  "raise_pct": 5,
+  "raise_min_tg": 20,
+  "lower_pct": 2,
+  "lower_after_runs": 2,
+  "outbid_tg": 1,
+  "forget_competitor_hours": 6,
+  "min_bid_tg": 150,
+  "bid_units_per_tg": 100
+}
