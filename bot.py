@@ -432,7 +432,7 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
 
     def card(nm, r):
         return P.setdefault(nm, {"art": r.get("vendorCode", ""), "name": r.get("subjectName", ""),
-                                 "sold": 0, "ret": 0, "otkaz": 0, "retail": 0, "pay": 0,
+                                 "sold": 0, "ret": 0, "otkaz": 0, "retail": 0, "price": 0, "pay": 0,
                                  "logi": 0, "stor": 0, "pen": 0, "ded": 0, "acc": 0, "add": 0})
 
     P = {}
@@ -450,7 +450,8 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
             c["ret"] += q
         if doc:
             # WB кабинетіндегі «Продажа» = «Цена розничная с учётом согласованной скидки» × дана
-            c["retail"] += sign * num(r.get("retailPriceWithDisc")) * abs(q or 0) * k
+            c["retail"] += sign * num(r.get("retailAmount")) * k        # кабинеттегі «Продажа» (WB реализовал, Пр)
+            c["price"] += sign * num(r.get("retailPriceWithDisc")) * abs(q or 0) * k   # сіздің бағаңыз
             c["pay"] += sign * num(r.get("forPay")) * k
         c["otkaz"] += r.get("returnAmount") or 0
         c["logi"] += num(r.get("deliveryService")) * k   # rebillLogisticCost осының ішінде, қайта қоспаймыз
@@ -474,12 +475,12 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
         tgt = o_cancel if o.get("isCancel") else o_cnt
         tgt[o["nmId"]] = tgt.get(o["nmId"], 0) + 1
 
-    T = {x: 0.0 for x in ("sold", "ret", "otkaz", "retail", "pay", "logi", "stor", "pen",
+    T = {x: 0.0 for x in ("sold", "ret", "otkaz", "retail", "price", "pay", "logi", "stor", "pen",
                           "ded", "acc", "add", "cost", "ad", "profit")}
     no_cost, lines = set(), []
     all_nm = set(P) | set(o_cnt) | set(nm for nm, a in ad_nm.items() if a["sum"] > 0)
     for nm in all_nm:
-        c = P.get(nm) or {"art": "", "name": "", "sold": 0, "ret": 0, "otkaz": 0, "retail": 0,
+        c = P.get(nm) or {"art": "", "name": "", "sold": 0, "ret": 0, "otkaz": 0, "retail": 0, "price": 0,
                           "pay": 0, "logi": 0, "stor": 0, "pen": 0, "ded": 0, "acc": 0, "add": 0}
         cost_u = costs.get(str(nm)) if nm else None
         net_q = c["sold"] - c["ret"]
@@ -497,7 +498,7 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
             per_u = (c["pay"] - c["logi"]) / max(c["sold"], 1) - (cost_u or 0)
             f0 = per_u * n_ord - ad
             forecast = f0 - max(f0, 0) * TAX_K
-        for x in ("sold", "ret", "otkaz", "retail", "pay", "logi", "stor", "pen", "ded", "acc", "add"):
+        for x in ("sold", "ret", "otkaz", "retail", "price", "pay", "logi", "stor", "pen", "ded", "acc", "add"):
             T[x] += c[x]
         T["cost"] += cost
         T["ad"] += ad
@@ -519,8 +520,11 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
           f"🚫 отказ {int(T['otkaz'])}",
           "",
           "<b>💵 Ақша (WB-мен бірдей):</b>",
-          f"Сатылым сомасы: {m(T['retail'])}",
-          f"WB комиссиясы + эквайринг: −{m(T['retail'] - T['pay'])}",
+          f"Сатылым (кабинеттегі «Продажа»): {m(T['retail'])}",
+          f"Сіздің бағаңызбен сатылым: {m(T['price'])}",
+          f"WB комиссиясы + эквайринг (сіздің бағаңыздан): −{m(T['price'] - T['pay'])}"
+          + (f" ({pct(T['price'] - T['pay'], T['price'])})" if T['price'] else ""),
+          f"К перечислению: {m(T['pay'])}",
           f"Логистика: −{m(T['logi'])}",
           f"Сақтау (хранение): −{m(T['stor'])}",
           f"Айыппұл (штраф): −{m(T['pen'])}",
@@ -614,6 +618,51 @@ def finance_job(md, d1, d2, camps, ords, costs, force=False):
     return True
 
 
+
+def commission_report(weeks=4):
+    """Соңғы N апталық есеп бойынша WB комиссиясы: предмет және схема (FBW/FBS) бойынша."""
+    today = datetime.now(MSK).date()
+    last_sun = today - timedelta(days=today.weekday() + 1)
+    first_mon = last_sun - timedelta(days=7 * weeks - 1)
+    rows = fin_detail(first_mon, last_sun, "weekly")
+    G = {}
+    for r in rows:
+        doc = (r.get("docTypeName") or "").lower()
+        q = abs(r.get("quantity") or 0)
+        if not q or not (doc.startswith("продажа") or doc.startswith("возврат")):
+            continue
+        sign = -1 if doc.startswith("возврат") else 1
+        dm = (r.get("deliveryMethod") or "").upper()
+        scheme = "FBS" if dm.startswith("FBS") else ("FBW" if dm.startswith("FBW") else (dm.split(",")[0] or "?"))
+        key = (r.get("subjectName") or "?", scheme)
+        g = G.setdefault(key, {"q": 0, "price": 0.0, "pay": 0.0, "acq": 0.0, "kvw_w": 0.0, "spp_w": 0.0})
+        price = num(r.get("retailPriceWithDisc")) * q
+        g["q"] += sign * q
+        g["price"] += sign * price
+        g["pay"] += sign * num(r.get("forPay"))
+        g["acq"] += sign * num(r.get("acquiringFee"))
+        if sign > 0:
+            g["kvw_w"] += num(r.get("commissionPercent")) * price
+            g["spp_w"] += num(r.get("spp")) * price
+    L = [f"<b>📊 WB комиссиясы — {first_mon:%d.%m}–{last_sun:%d.%m.%Y} ({weeks} апта)</b>",
+         "Тариф = WB-ның есептегі комиссия ставкасы (кВВ)",
+         "Нақты = (сатылым − WB аударған) ÷ сатылым, эквайрингпен, СПП өтемақысынан кейін", ""]
+    tp = tpay = 0.0
+    for (subj, sch), g in sorted(G.items(), key=lambda x: -x[1]["price"]):
+        if g["price"] <= 0:
+            continue
+        pos = g["price"] if g["price"] else 1
+        kvw = g["kvw_w"] / pos
+        eff = (g["price"] - g["pay"]) / g["price"] * 100
+        L.append(f"<b>{escape(subj)}</b> · {sch} · {g['q']} дана")
+        L.append(f"   тариф {kvw:.2f}% · СПП {g['spp_w'] / pos:.1f}% · эквайринг {g['acq'] / g['price'] * 100:.2f}%"
+                 f" · <b>нақты {eff:.2f}%</b>")
+        L.append(f"   сатылым {m(g['price'])} → WB аударды {m(g['pay'])}")
+        tp += g["price"]; tpay += g["pay"]
+    if tp:
+        L += ["", f"<b>Барлығы: нақты комиссия {(tp - tpay) / tp * 100:.2f}%</b> ({m(tp - tpay)} / {m(tp)})"]
+    tg("\n".join(L))
+
 # ---------------------------------------------------------------- main
 def target_time(now):
     """Есеп қай :00-ге арналған. Cron :50-де іске қосылады.
@@ -629,6 +678,9 @@ def target_time(now):
 
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "auto" else None
+    if arg == "commission":
+        commission_report(int(sys.argv[2]) if len(sys.argv) > 2 else 4)
+        return
     now = datetime.now(TZ)
     if arg:
         modes, send_at = [arg], now
