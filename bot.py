@@ -254,7 +254,7 @@ def card_name(nm, ad=None, od=None):
 def build(kind, label, d1, d2, camps, stats, ords, rate, bal, send_at):
     by_camp, ad_nm = agg_ads(stats, camps, d1, d2)
     have_orders = ords is not None
-    tot_o, ord_nm = agg_orders(ords or [], rate, d1, d2)
+    tot_o, ord_nm = agg_orders(ords or [], 1.0, d1, d2)
 
     spend = sum(c["sum"] for c in by_camp.values())
     ad_ord = sum(c["orders"] for c in by_camp.values())
@@ -676,29 +676,132 @@ def target_time(now):
     return base
 
 
+def sales_since(d1):
+    """Выкуптар (saleID S...) және қайтарулар (R...) d1-ден бастап. Сомалар сатушы валютасында (₸)."""
+    try:
+        return wb("GET", f"{STAT}/api/v1/supplier/sales",
+                  params={"dateFrom": d1.isoformat(), "flag": 0}, tries=5, max_wait=70) or []
+    except Exception:
+        return None
+
+
+def build_ads(send_at, d, camps, stats, bal):
+    """Әр 2 сағаттық ПРОДВИЖЕНИЕ есебі: бүгін жарнамаға қанша кетті, неге кетті."""
+    by_camp, by_nm = agg_ads(stats, camps, d, d)
+    spend = sum(c["sum"] for c in by_camp.values())
+    ad_ord = sum(c["orders"] for c in by_camp.values())
+    ad_sum = sum(c["sum_price"] for c in by_camp.values())
+    clicks = sum(c["clicks"] for c in by_camp.values())
+    views = sum(c["views"] for c in by_camp.values())
+    L = [f"<b>📢 Продвижение — {send_at:%H:%M}</b>", f"🗓 {d:%d.%m.%Y} (бүгін, WB күні)", "",
+         f"💸 Жарнамаға кетті: <b>{m(spend)}</b>",
+         f"🛒 Жарнамадан тапсырыс: <b>{ad_ord} дана / {m(ad_sum)}</b>",
+         f"🎯 1 тапсырыс: {m(spend / ad_ord) if ad_ord else '—'} · ДРР {pct(spend, ad_sum)}",
+         f"👁 Көрсетілім {views:,} · клик {clicks:,} · CTR {pct(clicks, views)}".replace(",", " ")]
+    if bal is not None:
+        L.append(f"💰 Жарнама балансы: {m(bal)}")
+    rows = sorted((c for c in by_camp.values() if c["sum"] > 0), key=lambda c: -c["sum"])
+    if rows:
+        L += ["", "<b>📣 Кампаниялар:</b>"]
+        for c in rows:
+            L.append(f"• {escape(c['name'][:28])}: <b>{m(c['sum'])}</b> → {c['orders']} тапс."
+                     + (f", 1 тапс. {m(c['sum'] / c['orders'])}" if c["orders"] else ""))
+    cards = sorted((x for x in by_nm.items() if x[1]["sum"] > 0), key=lambda x: -x[1]["sum"])
+    if cards:
+        L += ["", "<b>📦 Карточкалар:</b>"]
+        for nm, a in cards[:TOP_CARDS]:
+            L.append(f"• {escape(card_name(nm, a))} ({nm}): {m(a['sum'])} → {a['orders']} тапс.")
+    W = []
+    for c in by_camp.values():
+        lim = MAX_CPO.get(c["id"])
+        if lim and c["orders"] and c["sum"] / c["orders"] > lim:
+            W.append(f"🔴 {escape(c['name'][:28])}: 1 тапсырыс {m(c['sum'] / c['orders'])} (шек {m(lim)})")
+        if c["orders"] == 0 and c["sum"] >= CFG.get("alert_zero_orders_spend", 3000):
+            W.append(f"🟠 {escape(c['name'][:28])}: {m(c['sum'])} жұмсалды, тапсырыс жоқ")
+    if bal is not None and bal < CFG.get("alert_low_balance", 20000):
+        W.append(f"🟡 Жарнама балансы аз: {m(bal)}")
+    for cid in CFG.get("must_be_active", []):
+        st = camps.get(cid, {}).get("status")
+        if st is not None and st != 9:
+            W.append(f"⏸ {escape(CNAMES.get(cid, str(cid)))} кампаниясы тоқтап тұр")
+    if W:
+        L += ["", "<b>⚠️ Ескертулер:</b>"] + W
+    return "\n".join(L)
+
+
+def build_daily(d, camps, stats, ords, sales):
+    """Таңғы 09:00 КҮНДІК САУДА есебі (кеше): не сатылды, қанша, қандай сомаға, жарнама."""
+    _, ad_nm = agg_ads(stats, camps, d, d)
+    P = {}
+
+    def card(nm, r):
+        return P.setdefault(nm, {"art": r.get("supplierArticle", ""), "subj": r.get("subject", ""),
+                                 "ord": 0, "ord_sum": 0.0, "cancel": 0,
+                                 "sold": 0, "sold_sum": 0.0, "ret": 0, "ret_sum": 0.0})
+    for o in ords or []:
+        if order_dt(o).date() != d:
+            continue
+        c = card(o["nmId"], o)
+        if o.get("isCancel"):
+            c["cancel"] += 1
+        else:
+            c["ord"] += 1
+            c["ord_sum"] += o.get("priceWithDisc") or 0
+    for x in sales or []:
+        if order_dt(x).date() != d:
+            continue
+        c = card(x["nmId"], x)
+        price = abs(x.get("priceWithDisc") or 0)
+        if str(x.get("saleID", "")).startswith("R"):
+            c["ret"] += 1
+            c["ret_sum"] += price
+        else:
+            c["sold"] += 1
+            c["sold_sum"] += price
+    for nm, a in ad_nm.items():
+        if a["sum"] > 0 and nm not in P:
+            card(nm, {})
+    T = {k: sum(c[k] for c in P.values()) for k in ("ord", "ord_sum", "cancel", "sold", "sold_sum", "ret", "ret_sum")}
+    ad_total = sum(a["sum"] for a in ad_nm.values())
+    L = [f"<b>🌅 Күндік сауда есебі</b>", f"🗓 {d:%d.%m.%Y} (кеше)", ""]
+    if ords is None or sales is None:
+        L.append("⚠️ WB кейбір деректі бермеді (лимит) — сандар толық емес болуы мүмкін\n")
+    L += [f"✅ Сатылды (выкуп): <b>{T['sold']} дана / {m(T['sold_sum'])}</b>",
+          f"↩️ Қайтару: {T['ret']} дана / {m(T['ret_sum'])}",
+          f"🛒 Тапсырыс: {T['ord']} дана / {m(T['ord_sum'])} · ❌ отмена {T['cancel']}",
+          f"📢 Продвижениеге кетті: <b>{m(ad_total)}</b>",
+          f"📊 ДРР (жарнама ÷ тапсырыс сомасы): {pct(ad_total, T['ord_sum'])}"]
+    rows = sorted(P.items(), key=lambda x: (-x[1]["sold_sum"], -x[1]["ord"], -ad_nm.get(x[0], {}).get("sum", 0)))
+    if rows:
+        L += ["", "<b>📦 Не сатылды:</b>"]
+        for nm, c in rows[:CFG.get("top_cards_sales", 25)]:
+            ad = ad_nm.get(nm, {}).get("sum", 0)
+            name = NAMES.get(nm) or c["art"] or ad_nm.get(nm, {}).get("name") or c["subj"] or str(nm)
+            parts = [f"✅ {c['sold']} дана / {m(c['sold_sum'])}"]
+            if c["ret"]:
+                parts.append(f"↩️ {c['ret']}")
+            parts.append(f"🛒 тапс. {c['ord']}")
+            if ad:
+                parts.append(f"📢 {m(ad)}")
+            L.append(f"\n<b>{escape(name[:32])}</b> ({nm})\n   " + " · ".join(parts))
+        if len(rows) > CFG.get("top_cards_sales", 25):
+            L.append(f"\n…тағы {len(rows) - CFG.get('top_cards_sales', 25)} артикул")
+    L += ["", "<i>Нақты пайда апталық қаржы есебінде (WB есебі шыққанда) келеді.</i>"]
+    return "\n".join(L)
+
+
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "auto" else None
     if arg == "commission":
         commission_report(int(sys.argv[2]) if len(sys.argv) > 2 else 4)
         return
     now = datetime.now(TZ)
-    if arg:
-        modes, send_at = [arg], now
-    else:
-        send_at = target_time(now)
-        # Сағаттық есеп әр EVERY сағат сайын (жұп сағаттарда: 10:00, 12:00 ...)
-        modes = ["hourly"] if send_at.hour % EVERY == 0 else []
-        if send_at.hour == CFG.get("daily_hour", 9):
-            modes.append("ads_daily")
-            if send_at.weekday() == 0:
-                modes.append("ads_weekly")
-
+    send_at = now if arg else target_time(now)
     today = send_at.astimezone(MSK).date()          # WB күні
     yday = today - timedelta(days=1)
     last_mon = today - timedelta(days=today.weekday() + 7)
     last_sun = last_mon + timedelta(days=6)
-    # Қолмен басқа кезеңді алу: "weekly 2026-11-02" (сол аптаның дүйсенбісі) немесе "daily 2026-11-10"
-    if arg and len(sys.argv) > 2:
+    if arg and len(sys.argv) > 2:                   # қолмен: "daily 2026-11-10", "weekly 2026-11-02"
         dd = date.fromisoformat(sys.argv[2])
         if arg == "weekly":
             last_mon = dd - timedelta(days=dd.weekday())
@@ -706,73 +809,60 @@ def main():
         elif arg == "daily":
             yday = dd
 
-    # --- Жарнама есептері (бұрынғыдай)
-    ad_periods = {}
-    for md in modes:
-        if md == "hourly":
-            ad_periods[md] = (today, today, f"⏱ Сағаттық есеп — {send_at:%H:%M}")
-        elif md in ("ads_daily", "daily"):
-            ad_periods[md] = (yday, yday, "📅 Күндік жарнама есебі (кеше)")
-        elif md in ("ads_weekly", "weekly"):
-            ad_periods[md] = (last_mon, last_sun, "📈 Апталық жарнама есебі (Дс–Жс)")
-        else:
-            raise SystemExit(f"Белгісіз режим: {md}")
-
-    # Қаржы есебі қажет пе? (күніне/аптасына бір рет, state арқылы)
     st = load_state()
-    fin_jobs = []
-    if arg in ("daily", "weekly"):
-        fin_jobs.append((arg, *((yday, yday) if arg == "daily" else (last_mon, last_sun)), True))
-    elif not arg and CFG.get("daily_hour", 9) <= send_at.hour <= 23:
-        if st.get("daily_done") != yday.isoformat():
-            fin_jobs.append(("daily", yday, yday, False))
-        if send_at.weekday() <= 2 and st.get("weekly_done") != last_mon.isoformat():
-            fin_jobs.append(("weekly", last_mon, last_sun, False))
-
-    if not ad_periods and not fin_jobs:
-        print(f"{send_at:%H:%M} — бұл сағатта есеп жоқ (әр {EVERY} сағат сайын)")
+    do_ads = arg in ("hourly", "ads") or (not arg and send_at.hour % EVERY == 0)
+    do_daily = arg == "daily" or (not arg and send_at.hour == CFG.get("daily_hour", 9)
+                                  and st.get("sales_done") != yday.isoformat())
+    do_weekly = arg == "weekly" or (not arg and CFG.get("daily_hour", 9) <= send_at.hour <= 23
+                                    and send_at.weekday() <= 2 and st.get("weekly_done") != last_mon.isoformat())
+    if arg and not (do_ads or do_daily or do_weekly):
+        raise SystemExit(f"Белгісіз режим: {arg}")
+    if not (do_ads or do_daily or do_weekly):
+        print(f"{send_at:%H:%M} — бұл сағатта есеп жоқ")
         return
-    d_from = min([p[0] for p in ad_periods.values()] + [j[1] for j in fin_jobs])
-    d_to = max([p[1] for p in ad_periods.values()] + [j[2] for j in fin_jobs])
+
+    d_from = min([today] + ([yday] if do_daily else []) + ([last_mon] if do_weekly else []))
     camps = campaigns()
     try:
-        stats = fullstats(list(camps), d_from, d_to) if camps else []
+        stats = fullstats(list(camps), d_from, today) if camps else []
     except Exception:
         stats = []
-    bal = balance()
-    ords = orders_since(d_from)
-    rate = rub_rate()
+    bal = balance() if do_ads else None
+    ords = sales = None
+    if do_daily or do_weekly:
+        ords = orders_since(d_from)
+    if do_daily:
+        time.sleep(62)                              # статистика API: минутына 1 сұраныс
+        sales = sales_since(yday)
 
     wait = (send_at - datetime.now(TZ)).total_seconds()
     if wait > 0:
         print(f"Деректер дайын, {send_at:%H:%M}-ге дейін {wait:.0f} с күтеміз")
         time.sleep(wait)
 
-    for md, (d1, d2, label) in ad_periods.items():
-        kind = "hourly" if md == "hourly" else "daily"
-        tg(build(kind, label, d1, d2, camps, stats, ords, rate, bal, send_at))
+    if do_ads:
+        tg(build_ads(send_at, today, camps, stats, bal))
+    if do_daily:
+        tg(build_daily(yday, camps, stats, ords, sales))
+        if not arg:
+            st["sales_done"] = yday.isoformat()
+            save_state(st)
 
-    # --- Қаржы есебі (:00-ден кейін, WB дайын болса)
-    if fin_jobs:
-        costs = load_costs()
-        for md, d1, d2, force in fin_jobs:
-            try:
-                if finance_job(md, d1, d2, camps, ords, costs, force):
-                    st[f"{md}_done"] = d1.isoformat()
-                    save_state(st)
-            except WBLimit:
-                print(f"{md}: WB лимиті, келесі сағатта қайталаймыз")
-            except requests.HTTPError as e:
-                code = e.response.status_code if e.response is not None else "?"
-                if code in (401, 403):
-                    if st.get("fin_token_warned") != today.isoformat():
-                        tg("⚠️ Қаржы есебі үшін WB токенінде «Финансы» рұқсаты жоқ. "
-                           "WB кабинетінде Финансы санаты бар жаңа токен жасап, GitHub-тағы WB_TOKEN-ді ауыстырыңыз.")
-                        st["fin_token_warned"] = today.isoformat()
-                        save_state(st)
-                else:
-                    print(f"{md}: HTTP {code}")
-            time.sleep(62)
+    # --- Апталық жалпы есеп (WB қаржы есебі шыққанда, бір рет)
+    if do_weekly:
+        try:
+            if finance_job("weekly", last_mon, last_sun, camps, ords, load_costs(), bool(arg)) and not arg:
+                st["weekly_done"] = last_mon.isoformat()
+                save_state(st)
+        except WBLimit:
+            print("weekly: WB лимиті, келесі сағатта қайталаймыз")
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else "?"
+            print(f"weekly: HTTP {code}")
+            if code in (401, 403) and st.get("fin_token_warned") != today.isoformat():
+                tg("⚠️ Апталық есеп үшін WB токенінде «Финансы» рұқсаты жоқ.")
+                st["fin_token_warned"] = today.isoformat()
+                save_state(st)
 
 
 if __name__ == "__main__":
