@@ -665,15 +665,14 @@ def commission_report(weeks=4):
 
 # ---------------------------------------------------------------- main
 def target_time(now):
-    """Есеп қай :00-ге арналған. Cron :50-де іске қосылады.
-    :45–:59 → келесі сағат (күтеміз); :00–:29 → GitHub кешікті, бірден жібереміз;
-    :30–:44 → тым кеш, келесі іске қосылу жібереді (қайталанбау үшін)."""
+    """Есеп қай :00-ге арналған. GitHub cron уақытты дәл сақтамайды
+    (іс жүзінде :30–:55 аралығында іске қосылады), сондықтан:
+    :15–:59 → келесі сағат (сол :00-ге дейін күтеміз);
+    :00–:14 → GitHub кешікті, осы сағаттың есебін бірден жібереміз."""
     base = now.replace(minute=0, second=0, microsecond=0)
-    if now.minute >= 45:
+    if now.minute >= 15:
         return base + timedelta(hours=1)
-    if now.minute < 30:
-        return base
-    return None
+    return base
 
 
 def main():
@@ -686,9 +685,6 @@ def main():
         modes, send_at = [arg], now
     else:
         send_at = target_time(now)
-        if send_at is None:
-            print(f"{now:%H:%M} — тым кеш іске қосылды, өткізіп жібереміз")
-            return
         modes = ["hourly"]
         if send_at.hour == CFG.get("daily_hour", 9):
             modes.append("ads_daily")
