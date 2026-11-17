@@ -449,7 +449,8 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
         elif doc.startswith("возврат") and q:
             c["ret"] += q
         if doc:
-            c["retail"] += sign * num(r.get("retailAmount")) * k
+            # WB кабинетіндегі «Продажа» = «Цена розничная с учётом согласованной скидки» × дана
+            c["retail"] += sign * num(r.get("retailPriceWithDisc")) * abs(q or 0) * k
             c["pay"] += sign * num(r.get("forPay")) * k
         c["otkaz"] += r.get("returnAmount") or 0
         c["logi"] += num(r.get("deliveryService")) * k + num(r.get("rebillLogisticCost")) * k
