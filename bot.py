@@ -763,29 +763,47 @@ def build_daily(d, camps, stats, ords, sales):
             card(nm, {})
     T = {k: sum(c[k] for c in P.values()) for k in ("ord", "ord_sum", "cancel", "sold", "sold_sum", "ret", "ret_sum")}
     ad_total = sum(a["sum"] for a in ad_nm.values())
-    L = [f"<b>🌅 Күндік сауда есебі</b>", f"🗓 {d:%d.%m.%Y} (кеше)", ""]
+    top = CFG.get("top_cards_sales", 25)
+
+    def nm_title(nm, c):
+        return escape((NAMES.get(nm) or c["art"] or ad_nm.get(nm, {}).get("name") or c["subj"] or str(nm))[:32])
+
+    L = [f"<b>🌅 Күндік есеп: тапсырыс + выкуп</b>", f"🗓 {d:%d.%m.%Y} (кеше)", ""]
     if ords is None or sales is None:
         L.append("⚠️ WB кейбір деректі бермеді (лимит) — сандар толық емес болуы мүмкін\n")
-    L += [f"✅ Сатылды (выкуп): <b>{T['sold']} дана / {m(T['sold_sum'])}</b>",
-          f"↩️ Қайтару: {T['ret']} дана / {m(T['ret_sum'])}",
-          f"🛒 Тапсырыс: {T['ord']} дана / {m(T['ord_sum'])} · ❌ отмена {T['cancel']}",
-          f"📢 Продвижениеге кетті: <b>{m(ad_total)}</b>",
-          f"📊 ДРР (жарнама ÷ тапсырыс сомасы): {pct(ad_total, T['ord_sum'])}"]
-    rows = sorted(P.items(), key=lambda x: (-x[1]["sold_sum"], -x[1]["ord"], -ad_nm.get(x[0], {}).get("sum", 0)))
-    if rows:
-        L += ["", "<b>📦 Не сатылды:</b>"]
-        for nm, c in rows[:CFG.get("top_cards_sales", 25)]:
-            ad = ad_nm.get(nm, {}).get("sum", 0)
-            name = NAMES.get(nm) or c["art"] or ad_nm.get(nm, {}).get("name") or c["subj"] or str(nm)
-            parts = [f"✅ {c['sold']} дана / {m(c['sold_sum'])}"]
-            if c["ret"]:
-                parts.append(f"↩️ {c['ret']}")
-            parts.append(f"🛒 тапс. {c['ord']}")
-            if ad:
-                parts.append(f"📢 {m(ad)}")
-            L.append(f"\n<b>{escape(name[:32])}</b> ({nm})\n   " + " · ".join(parts))
-        if len(rows) > CFG.get("top_cards_sales", 25):
-            L.append(f"\n…тағы {len(rows) - CFG.get('top_cards_sales', 25)} артикул")
+    L += [f"🛒 Тапсырыс: <b>{T['ord']} дана / {m(T['ord_sum'])}</b> · ❌ отмена {T['cancel']}",
+          f"✅ Выкуп: <b>{T['sold']} дана / {m(T['sold_sum'])}</b> · ↩️ қайтару {T['ret']} ({m(T['ret_sum'])})",
+          f"📢 Продвижение: <b>{m(ad_total)}</b> · ДРР {pct(ad_total, T['ord_sum'])}"]
+
+    # --- 1-бөлім: тапсырыстар
+    o_rows = sorted(((nm, c) for nm, c in P.items() if c["ord"] or c["cancel"]), key=lambda x: -x[1]["ord_sum"])
+    L += ["", f"<b>🛒 1. ТАПСЫРЫСТАР ({T['ord']} дана / {m(T['ord_sum'])})</b>"]
+    for nm, c in o_rows[:top]:
+        ad = ad_nm.get(nm, {}).get("sum", 0)
+        L.append(f"• {nm_title(nm, c)} ({nm}): <b>{c['ord']} дана / {m(c['ord_sum'])}</b>"
+                 + (f" · ❌ {c['cancel']}" if c["cancel"] else "") + (f" · 📢 {m(ad)}" if ad else ""))
+    if len(o_rows) > top:
+        L.append(f"…тағы {len(o_rows) - top} артикул")
+    if not o_rows:
+        L.append("тапсырыс жоқ")
+
+    # --- 2-бөлім: выкуптар
+    s_rows = sorted(((nm, c) for nm, c in P.items() if c["sold"] or c["ret"]), key=lambda x: -x[1]["sold_sum"])
+    L += ["", f"<b>✅ 2. ВЫКУП ({T['sold']} дана / {m(T['sold_sum'])})</b>"]
+    for nm, c in s_rows[:top]:
+        L.append(f"• {nm_title(nm, c)} ({nm}): <b>{c['sold']} дана / {m(c['sold_sum'])}</b>"
+                 + (f" · ↩️ қайтару {c['ret']}" if c["ret"] else ""))
+    if len(s_rows) > top:
+        L.append(f"…тағы {len(s_rows) - top} артикул")
+    if not s_rows:
+        L.append("выкуп жоқ")
+
+    # --- Тапсырысы жоқ, бірақ жарнамасы бар карточкалар
+    idle = [(nm, a) for nm, a in ad_nm.items() if a["sum"] > 0 and not P.get(nm, {}).get("ord")]
+    if idle:
+        L += ["", "<b>📢 Жарнамасы бар, тапсырысы жоқ:</b>"]
+        for nm, a in sorted(idle, key=lambda x: -x[1]["sum"]):
+            L.append(f"• {escape(card_name(nm, a))} ({nm}): {m(a['sum'])}")
     L += ["", "<i>Нақты пайда апталық қаржы есебінде (WB есебі шыққанда) келеді.</i>"]
     return "\n".join(L)
 
