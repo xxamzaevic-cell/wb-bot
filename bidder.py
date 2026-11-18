@@ -62,7 +62,9 @@ def wb(method, path, tries=3, **kw):
                 wait = float(wait) + 2
             except (TypeError, ValueError):
                 wait = 15 * (attempt + 1)
-            time.sleep(min(wait, 280))   # WB «айып» уақытын толық күтеміз
+            if wait > 280:               # ұзақ айып — күтпейміз, келесі сағатта
+                raise RuntimeError(f"{path}: WB лимиті, {int(wait)} сек күту керек")
+            time.sleep(wait)
             continue
         time.sleep(7)                   # WB лимиті: сұраныстар арасы ≥6 сек
         if r.status_code == 204 or not r.content:
@@ -291,12 +293,13 @@ def main():
 
     head = f"🎯 <b>Биддер</b> {datetime.now(TZ):%d.%m %H:%M} · кампания {AID}"
     msg = "\n".join([head] + lines + ([ok] if ok else []))
-    if dry and not st.get("dry_debug_sent"):
+    first_debug = dry and not st.get("dry_debug_sent")
+    if first_debug:
         st["dry_debug_sent"] = 1
         msg += ("\n\n<b>Тексеру үшін (бір рет):</b>\nWB get-bids жауабы:\n<code>"
                 + escape(json.dumps(raw_bids, ensure_ascii=False)[:1200]) + "</code>"
                 + f"\nБірлік: 1 ₸ = {U:g} API бірлігі. Ставкалар кабинеттегімен сәйкес пе?")
-    if changes or mode or any("⚠️" in l for l in lines):
+    if changes or mode or first_debug or any("⚠️" in l for l in lines):
         tg(msg)                  # өзгеріс жоқ болса, Telegram-ды толтырмаймыз
     else:
         print(msg)
