@@ -55,6 +55,8 @@ def wb(method, path, tries=4, **kw):
             time.sleep(10)
             continue
         if r.status_code == 429 or r.status_code >= 500:
+            print(f"{path} → {r.status_code} {dict((k, v) for k, v in r.headers.items() if 'atelimit' in k or k == 'Retry-After')}",
+                  flush=True)
             wait = r.headers.get("X-Ratelimit-Retry") or r.headers.get("Retry-After")
             try:
                 wait = float(wait) + 2
@@ -231,8 +233,20 @@ def main():
     cl_state = st.setdefault("clusters", {})
 
     bids, raw_bids = current_bids()
+    # WB normquery/stats лимиті қатаң: бір іске қосылуда тек БІР сұраныс жасаймыз.
+    # 7 күндік CPO 6 сағатта бір рет жаңарады, қалған сағаттарда — бүгінгі позиция.
+    cpo_cache = st.get("cpo_cache") or {}
+    if not cpo_cache or now - st.get("cpo_ts", 0) > 6 * 3600:
+        period = cluster_stats(today - timedelta(days=C["cpo_days"] - 1), today)
+        st["cpo_cache"] = {q: {"orders": v["orders"], "spend": v["spend"]}
+                           for q, v in period.items()}
+        st["cpo_ts"] = now
+        save_state(st)
+        tg(f"🎯 <b>Биддер</b>: {C['cpo_days']} күндік CPO жаңартылды. "
+           "Ставка келесі сағатта тексеріледі.") if mode else print("CPO updated")
+        return
+    stats_period = cpo_cache
     stats_today = cluster_stats(today, today)
-    stats_period = cluster_stats(today - timedelta(days=C["cpo_days"] - 1), today)
     hints = leader_hints()
 
     lines, changes = [], {}
