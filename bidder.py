@@ -45,7 +45,7 @@ CLUSTERS = [norm(c) for c in C["clusters"]]
 
 
 # ---------------------------------------------------------------- HTTP
-def wb(method, path, tries=4, **kw):
+def wb(method, path, tries=3, **kw):
     url = path if path.startswith("http") else ADV + path
     for attempt in range(tries):
         try:
@@ -62,8 +62,9 @@ def wb(method, path, tries=4, **kw):
                 wait = float(wait) + 2
             except (TypeError, ValueError):
                 wait = 15 * (attempt + 1)
-            time.sleep(min(wait, 65))
+            time.sleep(min(wait, 280))   # WB «айып» уақытын толық күтеміз
             continue
+        time.sleep(7)                   # WB лимиті: сұраныстар арасы ≥6 сек
         if r.status_code == 204 or not r.content:
             return None
         if r.status_code >= 400:
