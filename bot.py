@@ -521,11 +521,11 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
           f"🚫 отказ {int(T['otkaz'])}",
           "",
           "<b>💵 Ақша (WB-мен бірдей):</b>",
-          f"Сатылым (кабинеттегі «Продажа»): {m(T['retail'])}",
-          f"Сіздің бағаңызбен сатылым: {m(T['price'])}",
+          f"Сатылым — сатып алушы төлеген (кабинеттегі «Продажа»): {m(T['retail'])}",
+          f"Сатылым — сіздің бағаңызбен (СПП-ға дейін): {m(T['price'])}",
           f"WB комиссиясы + эквайринг (сіздің бағаңыздан): −{m(T['price'] - T['pay'])}"
           + (f" ({pct(T['price'] - T['pay'], T['price'])})" if T['price'] else ""),
-          f"К перечислению: {m(T['pay'])}",
+          f"К перечислению (комиссиядан кейін WB аударатыны): {m(T['pay'])}",
           f"Логистика: −{m(T['logi'])}",
           f"Сақтау (хранение): −{m(T['stor'])}",
           f"Айыппұл (штраф): −{m(T['pen'])}",
@@ -533,7 +533,7 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
           f"Платная приёмка: −{m(T['acc'])}"]
     if T["add"]:
         L.append(f"Қосымша төлем (доплата): +{m(T['add'])}")
-    L.append(f"<b>Итого к оплате: {m(itog)}</b>")
+    L.append(f"<b>Итого к оплате (WB шотыңызға салатын ақша): {m(itog)}</b>")
     if bank is not None and abs(bank - itog_calc) > 1:
         L.append(f"<i>(жолдар бойынша есептегенде {m(itog_calc)}, айырма WB есебіндегі басқа операциялар)</i>")
     if ded_types:
@@ -560,21 +560,21 @@ def build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs):
             continue
         name = NAMES.get(nm) or c["art"] or c["name"] or str(nm)
         L.append(f"\n<b>{escape(name[:32])}</b> (арт. {nm})")
-        L.append(f"   🛒 заказ {n_ord} · ❌ отмена {n_can} · ✅ выкуп {c['sold']} · ↩️ қайтару {c['ret']}"
-                 + (f" · 🚫 отказ {c['otkaz']}" if c["otkaz"] else ""))
+        L.append(f"   🛒 тапсырыс: {n_ord} дана · ❌ отмена: {n_can} · ✅ выкуп: {c['sold']} дана · ↩️ қайтару: {c['ret']}"
+                 + (f" · 🚫 отказ: {c['otkaz']}" if c["otkaz"] else ""))
         if c["retail"]:
-            L.append(f"   💵 Сатылым {m(c['retail'])} → WB аударады {m(c['pay'])}")
+            L.append(f"   💵 Сатылым сомасы: {m(c['retail'])} · WB аударатыны: {m(c['pay'])}")
         costs_line = []
         if c["logi"]: costs_line.append(f"логистика {m(c['logi'])}")
         if c["stor"]: costs_line.append(f"сақтау {m(c['stor'])}")
         if c["pen"]: costs_line.append(f"штраф {m(c['pen'])}")
         if c["ded"]: costs_line.append(f"ұстау {m(c['ded'])}")
-        if cost: costs_line.append(f"себест. {m(cost)}")
+        if cost: costs_line.append(f"себестоимость {m(cost)}")
         if ad: costs_line.append(f"жарнама {m(ad)}")
         if costs_line:
-            L.append("   ➖ " + " · ".join(costs_line))
+            L.append("   ➖ Шығындар: " + " · ".join(costs_line))
         L.append(f"   💰 Таза пайда (16%-дан кейін): <b>{m(profit)}</b>" + (" ⚠️себест. жоқ" if cost_u is None and c["sold"] else "")
-                 + (f" · заказдан болжам {m(fcst)}" if fcst is not None else ""))
+                 + (f" · тапсырыстан күтілетін пайда: {m(fcst)}" if fcst is not None else ""))
     rest = [x for x in lines[top:] if x[0]]
     if rest:
         L.append(f"\n…тағы {len(rest)} артикул, пайдасы {m(sum(x[7] for x in rest))}")
@@ -695,22 +695,25 @@ def build_ads(send_at, d, camps, stats, bal):
     views = sum(c["views"] for c in by_camp.values())
     L = [f"<b>📢 Продвижение — {send_at:%H:%M}</b>", f"🗓 {d:%d.%m.%Y} (бүгін, WB күні)", "",
          f"💸 Жарнамаға кетті: <b>{m(spend)}</b>",
-         f"🛒 Жарнамадан тапсырыс: <b>{ad_ord} дана / {m(ad_sum)}</b>",
-         f"🎯 1 тапсырыс: {m(spend / ad_ord) if ad_ord else '—'} · ДРР {pct(spend, ad_sum)}",
-         f"👁 Көрсетілім {views:,} · клик {clicks:,} · CTR {pct(clicks, views)}".replace(",", " ")]
+         f"🛒 Жарнамадан келген тапсырыс: <b>{ad_ord} дана</b>",
+         f"💵 Ол тапсырыстардың сомасы: <b>{m(ad_sum)}</b>",
+         f"🎯 1 тапсырысқа кеткен жарнама: {m(spend / ad_ord) if ad_ord else '—'}",
+         f"📊 ДРР (жарнама ÷ тапсырыс сомасы): {pct(spend, ad_sum)}",
+         f"👁 Көрсетілім: {views:,} · 👆 Басу (клик): {clicks:,} · CTR (басу ÷ көрсетілім): {pct(clicks, views)}".replace(",", " ")]
     if bal is not None:
         L.append(f"💰 Жарнама балансы: {m(bal)}")
     rows = sorted((c for c in by_camp.values() if c["sum"] > 0), key=lambda c: -c["sum"])
     if rows:
         L += ["", "<b>📣 Кампаниялар:</b>"]
         for c in rows:
-            L.append(f"• {escape(c['name'][:28])}: <b>{m(c['sum'])}</b> → {c['orders']} тапс."
-                     + (f", 1 тапс. {m(c['sum'] / c['orders'])}" if c["orders"] else ""))
+            L.append(f"\n• <b>{escape(c['name'][:28])}</b>")
+            L.append(f"   жарнамаға кетті: <b>{m(c['sum'])}</b> · тапсырыс: {c['orders']} дана"
+                     + (f" · 1 тапсырысқа: {m(c['sum'] / c['orders'])}" if c["orders"] else ""))
     cards = sorted((x for x in by_nm.items() if x[1]["sum"] > 0), key=lambda x: -x[1]["sum"])
     if cards:
         L += ["", "<b>📦 Карточкалар:</b>"]
         for nm, a in cards[:TOP_CARDS]:
-            L.append(f"• {escape(card_name(nm, a))} ({nm}): {m(a['sum'])} → {a['orders']} тапс.")
+            L.append(f"• {escape(card_name(nm, a))} (арт. {nm}): жарнамаға кетті {m(a['sum'])} · тапсырыс {a['orders']} дана")
     W = []
     for c in by_camp.values():
         lim = MAX_CPO.get(c["id"])
@@ -771,17 +774,23 @@ def build_daily(d, camps, stats, ords, sales):
     L = [f"<b>🌅 Күндік есеп: тапсырыс + выкуп</b>", f"🗓 {d:%d.%m.%Y} (кеше)", ""]
     if ords is None or sales is None:
         L.append("⚠️ WB кейбір деректі бермеді (лимит) — сандар толық емес болуы мүмкін\n")
-    L += [f"🛒 Тапсырыс: <b>{T['ord']} дана / {m(T['ord_sum'])}</b> · ❌ отмена {T['cancel']}",
-          f"✅ Выкуп: <b>{T['sold']} дана / {m(T['sold_sum'])}</b> · ↩️ қайтару {T['ret']} ({m(T['ret_sum'])})",
-          f"📢 Продвижение: <b>{m(ad_total)}</b> · ДРР {pct(ad_total, T['ord_sum'])}"]
+    L += [f"🛒 Тапсырыс: <b>{T['ord']} дана</b>, сомасы <b>{m(T['ord_sum'])}</b>",
+          f"❌ Отмена (тапсырыстан бас тартты): {T['cancel']} дана",
+          f"✅ Выкуп (сатып алды): <b>{T['sold']} дана</b>, сомасы <b>{m(T['sold_sum'])}</b>",
+          f"↩️ Қайтару: {T['ret']} дана, сомасы {m(T['ret_sum'])}",
+          f"📢 Жарнамаға кетті: <b>{m(ad_total)}</b>",
+          f"📊 ДРР (жарнама ÷ тапсырыс сомасы): {pct(ad_total, T['ord_sum'])}",
+          "<i>Сомалар — сіздің жеңілдікпен қойған бағаңыз бойынша</i>"]
 
     # --- 1-бөлім: тапсырыстар
     o_rows = sorted(((nm, c) for nm, c in P.items() if c["ord"] or c["cancel"]), key=lambda x: -x[1]["ord_sum"])
-    L += ["", f"<b>🛒 1. ТАПСЫРЫСТАР ({T['ord']} дана / {m(T['ord_sum'])})</b>"]
+    L += ["", f"<b>🛒 1. ТАПСЫРЫСТАР: {T['ord']} дана, сомасы {m(T['ord_sum'])}</b>"]
     for nm, c in o_rows[:top]:
         ad = ad_nm.get(nm, {}).get("sum", 0)
-        L.append(f"• {nm_title(nm, c)} ({nm}): <b>{c['ord']} дана / {m(c['ord_sum'])}</b>"
-                 + (f" · ❌ {c['cancel']}" if c["cancel"] else "") + (f" · 📢 {m(ad)}" if ad else ""))
+        L.append(f"\n• <b>{nm_title(nm, c)}</b> (арт. {nm})")
+        L.append(f"   тапсырыс: <b>{c['ord']} дана</b>, сомасы <b>{m(c['ord_sum'])}</b>"
+                 + (f" · отмена: {c['cancel']} дана" if c["cancel"] else "")
+                 + (f" · жарнамаға кетті: {m(ad)}" if ad else ""))
     if len(o_rows) > top:
         L.append(f"…тағы {len(o_rows) - top} артикул")
     if not o_rows:
@@ -789,10 +798,11 @@ def build_daily(d, camps, stats, ords, sales):
 
     # --- 2-бөлім: выкуптар
     s_rows = sorted(((nm, c) for nm, c in P.items() if c["sold"] or c["ret"]), key=lambda x: -x[1]["sold_sum"])
-    L += ["", f"<b>✅ 2. ВЫКУП ({T['sold']} дана / {m(T['sold_sum'])})</b>"]
+    L += ["", f"<b>✅ 2. ВЫКУП: {T['sold']} дана, сомасы {m(T['sold_sum'])}</b>"]
     for nm, c in s_rows[:top]:
-        L.append(f"• {nm_title(nm, c)} ({nm}): <b>{c['sold']} дана / {m(c['sold_sum'])}</b>"
-                 + (f" · ↩️ қайтару {c['ret']}" if c["ret"] else ""))
+        L.append(f"\n• <b>{nm_title(nm, c)}</b> (арт. {nm})")
+        L.append(f"   выкуп: <b>{c['sold']} дана</b>, сомасы <b>{m(c['sold_sum'])}</b>"
+                 + (f" · қайтару: {c['ret']} дана, сомасы {m(c['ret_sum'])}" if c["ret"] else ""))
     if len(s_rows) > top:
         L.append(f"…тағы {len(s_rows) - top} артикул")
     if not s_rows:
@@ -803,7 +813,7 @@ def build_daily(d, camps, stats, ords, sales):
     if idle:
         L += ["", "<b>📢 Жарнамасы бар, тапсырысы жоқ:</b>"]
         for nm, a in sorted(idle, key=lambda x: -x[1]["sum"]):
-            L.append(f"• {escape(card_name(nm, a))} ({nm}): {m(a['sum'])}")
+            L.append(f"• {escape(card_name(nm, a))} (арт. {nm}): жарнамаға кетті {m(a['sum'])}")
     L += ["", "<i>Нақты пайда апталық қаржы есебінде (WB есебі шыққанда) келеді.</i>"]
     return "\n".join(L)
 
