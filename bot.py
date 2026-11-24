@@ -614,7 +614,7 @@ def finance_job(md, d1, d2, camps, ords, costs, force=False):
     except Exception:
         stats = []
     _, ad_nm = agg_ads(stats, camps, d1, d2)
-    title = "🧾 Күндік қаржы есебі" if md == "daily" else "🧾 Апталық қаржы есебі (Дс–Жс)"
+    title = "🧾 Күндік таза пайда" if md == "daily" else "🧾 Апталық қаржы есебі (Дс–Жс)"
     tg(build_finance(title, d1, d2, reports, rows, ords, ad_nm, costs))
     return True
 
@@ -732,9 +732,11 @@ def build_ads(send_at, d, camps, stats, bal):
     return "\n".join(L)
 
 
-def build_daily(d, camps, stats, ords, sales):
-    """Таңғы 09:00 КҮНДІК САУДА есебі (кеше): не сатылды, қанша, қандай сомаға, жарнама."""
+def build_daily(d, camps, stats, ords, sales, rate=None):
+    """Таңғы 09:00 КҮНДІК САУДА есебі (кеше): не сатылды, қанша, қандай сомаға, жарнама.
+    Статистика API бағаны РУБЛЬМЕН береді → бәрін ₸-ге айналдырамыз."""
     _, ad_nm = agg_ads(stats, camps, d, d)
+    rate = rate or rub_rate()
     P = {}
 
     def card(nm, r):
@@ -749,12 +751,12 @@ def build_daily(d, camps, stats, ords, sales):
             c["cancel"] += 1
         else:
             c["ord"] += 1
-            c["ord_sum"] += o.get("priceWithDisc") or 0
+            c["ord_sum"] += (o.get("priceWithDisc") or 0) * rate
     for x in sales or []:
         if order_dt(x).date() != d:
             continue
         c = card(x["nmId"], x)
-        price = abs(x.get("priceWithDisc") or 0)
+        price = abs(x.get("priceWithDisc") or 0) * rate
         if str(x.get("saleID", "")).startswith("R"):
             c["ret"] += 1
             c["ret_sum"] += price
@@ -774,13 +776,16 @@ def build_daily(d, camps, stats, ords, sales):
     L = [f"<b>🌅 Күндік есеп: тапсырыс + выкуп</b>", f"🗓 {d:%d.%m.%Y} (кеше)", ""]
     if ords is None or sales is None:
         L.append("⚠️ WB кейбір деректі бермеді (лимит) — сандар толық емес болуы мүмкін\n")
-    L += [f"🛒 Тапсырыс: <b>{T['ord']} дана</b>, сомасы <b>{m(T['ord_sum'])}</b>",
+    L += ["<i>Төмендегі «сомасы» — тауарлардың бағасы бойынша жалпы сомасы (ПАЙДА ЕМЕС): "
+          "WB комиссиясы, логистика, себестоимость, жарнама, салық әлі шегерілмеген. "
+          f"WB бағаны рубльмен береді, ₸-ге айналдырылды: 1 ₽ = {rate:.2f} ₸</i>", "",
+          f"🛒 Тапсырыс: <b>{T['ord']} дана</b>, сомасы <b>{m(T['ord_sum'])}</b>",
           f"❌ Отмена (тапсырыстан бас тартты): {T['cancel']} дана",
           f"✅ Выкуп (сатып алды): <b>{T['sold']} дана</b>, сомасы <b>{m(T['sold_sum'])}</b>",
           f"↩️ Қайтару: {T['ret']} дана, сомасы {m(T['ret_sum'])}",
           f"📢 Жарнамаға кетті: <b>{m(ad_total)}</b>",
           f"📊 ДРР (жарнама ÷ тапсырыс сомасы): {pct(ad_total, T['ord_sum'])}",
-          "<i>Сомалар — сіздің жеңілдікпен қойған бағаңыз бойынша</i>"]
+          "💰 Таза пайда: WB күндік қаржы есебі шыққанда бөлек хабармен келеді (🧾 Күндік таза пайда)"]
 
     # --- 1-бөлім: тапсырыстар
     o_rows = sorted(((nm, c) for nm, c in P.items() if c["ord"] or c["cancel"]), key=lambda x: -x[1]["ord_sum"])
@@ -814,7 +819,6 @@ def build_daily(d, camps, stats, ords, sales):
         L += ["", "<b>📢 Жарнамасы бар, тапсырысы жоқ:</b>"]
         for nm, a in sorted(idle, key=lambda x: -x[1]["sum"]):
             L.append(f"• {escape(card_name(nm, a))} (арт. {nm}): жарнамаға кетті {m(a['sum'])}")
-    L += ["", "<i>Нақты пайда апталық қаржы есебінде (WB есебі шыққанда) келеді.</i>"]
     return "\n".join(L)
 
 
@@ -843,13 +847,17 @@ def main():
                                   and st.get("sales_done") != yday.isoformat())
     do_weekly = arg == "weekly" or (not arg and CFG.get("daily_hour", 9) <= send_at.hour <= 23
                                     and send_at.weekday() <= 2 and st.get("weekly_done") != last_mon.isoformat())
-    if arg and not (do_ads or do_daily or do_weekly):
+    do_fin_daily = arg == "profit" or (not arg and send_at.hour >= CFG.get("daily_hour", 9)
+                                       and st.get("fin_daily_done") != yday.isoformat())
+    if arg == "profit" and len(sys.argv) > 2:
+        yday = date.fromisoformat(sys.argv[2])
+    if arg and not (do_ads or do_daily or do_weekly or do_fin_daily):
         raise SystemExit(f"Белгісіз режим: {arg}")
-    if not (do_ads or do_daily or do_weekly):
+    if not (do_ads or do_daily or do_weekly or do_fin_daily):
         print(f"{send_at:%H:%M} — бұл сағатта есеп жоқ")
         return
 
-    d_from = min([today] + ([yday] if do_daily else []) + ([last_mon] if do_weekly else []))
+    d_from = min([today] + ([yday] if (do_daily or do_fin_daily) else []) + ([last_mon] if do_weekly else []))
     camps = campaigns()
     try:
         stats = fullstats(list(camps), d_from, today) if camps else []
@@ -857,7 +865,7 @@ def main():
         stats = []
     bal = balance() if do_ads else None
     ords = sales = None
-    if do_daily or do_weekly:
+    if do_daily or do_weekly or do_fin_daily:
         ords = orders_since(d_from)
     if do_daily:
         time.sleep(62)                              # статистика API: минутына 1 сұраныс
@@ -875,6 +883,19 @@ def main():
         if not arg:
             st["sales_done"] = yday.isoformat()
             save_state(st)
+
+    # --- Күндік таза пайда (WB күндік қаржы есебі шыққанда, бір рет; дайын болмаса келесі сағатта)
+    if do_fin_daily:
+        try:
+            if finance_job("daily", yday, yday, camps, ords, load_costs(), bool(arg)) and not arg:
+                st["fin_daily_done"] = yday.isoformat()
+                save_state(st)
+            if do_weekly:
+                time.sleep(62)                      # қаржы API: минутына 1 сұраныс
+        except WBLimit:
+            print("daily profit: WB лимиті, келесі сағатта қайталаймыз")
+        except requests.HTTPError as e:
+            print(f"daily profit: HTTP {e.response.status_code if e.response is not None else '?'}")
 
     # --- Апталық жалпы есеп (WB қаржы есебі шыққанда, бір рет)
     if do_weekly:
