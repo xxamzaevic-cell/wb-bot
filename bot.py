@@ -732,17 +732,64 @@ def build_ads(send_at, d, camps, stats, bal):
     return "\n".join(L)
 
 
-def build_daily(d, camps, stats, ords, sales, rate=None):
+def unit_econ(st, today):
+    """Соңғы апталық WB қаржы есебінен әр артикулдың 1 данаға логистикасы мен WB аударатыны (₸).
+    Аптасына бір рет алынады, state-те сақталады."""
+    for back in (1, 2):
+        mon = today - timedelta(days=today.weekday() + 7 * back)
+        key = mon.isoformat()
+        if (st.get("econ") or {}).get("week") == key:
+            return st["econ"]
+        try:
+            rows = fin_detail(mon, mon + timedelta(days=6), "weekly")
+        except Exception:
+            rows = []
+        if not rows:
+            continue
+        cur = rows[0].get("currency") or "KZT"
+        k = 1.0 if cur == "KZT" else rub_rate()
+        A, tot = {}, {"sold": 0, "logi": 0.0, "pay": 0.0, "price": 0.0}
+        for r in rows:
+            nm = str(r.get("nmId") or 0)
+            a = A.setdefault(nm, {"sold": 0, "logi": 0.0, "pay": 0.0})
+            doc = (r.get("docTypeName") or "").lower()
+            q = abs(r.get("quantity") or 0)
+            sign = -1 if doc.startswith("возврат") else 1
+            if doc.startswith("продажа") and q:
+                a["sold"] += q; tot["sold"] += q
+            if doc and q:
+                a["pay"] += sign * num(r.get("forPay")) * k
+                tot["pay"] += sign * num(r.get("forPay")) * k
+                tot["price"] += sign * num(r.get("retailPriceWithDisc")) * q * k
+            lg = num(r.get("deliveryService")) * k
+            a["logi"] += lg; tot["logi"] += lg
+        econ = {"week": key, "u": {}, 
+                "logi_avg": tot["logi"] / tot["sold"] if tot["sold"] else 0,
+                "pay_ratio": tot["pay"] / tot["price"] if tot["price"] else 0.7}
+        for nm, a in A.items():
+            if a["sold"] > 0:
+                econ["u"][nm] = {"logi": a["logi"] / a["sold"], "pay": a["pay"] / a["sold"]}
+        st["econ"] = econ
+        save_state(st)
+        return econ
+    return {"u": {}, "logi_avg": float(CFG.get("logistics_per_unit", 0)),
+            "pay_ratio": float(CFG.get("default_forpay_ratio", 0.7))}
+
+
+def build_daily(d, camps, stats, ords, sales, rate=None, econ=None, costs=None):
     """Таңғы 09:00 КҮНДІК САУДА есебі (кеше): не сатылды, қанша, қандай сомаға, жарнама.
     Статистика API бағаны РУБЛЬМЕН береді → бәрін ₸-ге айналдырамыз."""
     _, ad_nm = agg_ads(stats, camps, d, d)
     rate = rate or rub_rate()
+    econ = econ or {"u": {}, "logi_avg": 0, "pay_ratio": 0.7}
+    costs = costs if costs is not None else load_costs()
     P = {}
 
     def card(nm, r):
         return P.setdefault(nm, {"art": r.get("supplierArticle", ""), "subj": r.get("subject", ""),
                                  "ord": 0, "ord_sum": 0.0, "cancel": 0,
-                                 "sold": 0, "sold_sum": 0.0, "ret": 0, "ret_sum": 0.0})
+                                 "sold": 0, "sold_sum": 0.0, "ret": 0, "ret_sum": 0.0,
+                                 "sold_pay": 0.0, "ret_pay": 0.0})
     for o in ords or []:
         if order_dt(o).date() != d:
             continue
@@ -757,17 +804,49 @@ def build_daily(d, camps, stats, ords, sales, rate=None):
             continue
         c = card(x["nmId"], x)
         price = abs(x.get("priceWithDisc") or 0) * rate
+        pay = abs(x.get("forPay") or 0) * rate          # WB аударатыны (комиссиядан кейін)
         if str(x.get("saleID", "")).startswith("R"):
             c["ret"] += 1
             c["ret_sum"] += price
+            c["ret_pay"] += pay
         else:
             c["sold"] += 1
             c["sold_sum"] += price
+            c["sold_pay"] += pay
     for nm, a in ad_nm.items():
         if a["sum"] > 0 and nm not in P:
             card(nm, {})
     T = {k: sum(c[k] for c in P.values()) for k in ("ord", "ord_sum", "cancel", "sold", "sold_sum", "ret", "ret_sum")}
     ad_total = sum(a["sum"] for a in ad_nm.values())
+
+    # --- Таза пайда (салық пен жарнамаға дейін, әр артикул бойынша)
+    no_cost = set()
+    for nm, c in P.items():
+        u = econ["u"].get(str(nm), {})
+        logi_u = u.get("logi", econ["logi_avg"])
+        cost_u = costs.get(str(nm))
+        if cost_u is None and (c["sold"] or c["ord"]):
+            no_cost.add(str(nm))
+        cost_u = cost_u or 0
+        # выкуп: нақты WB аударатыны − логистика − себестоимость; қайтару — кері
+        c["p_sold"] = (c["sold_pay"] - c["ret_pay"]) - logi_u * (c["sold"] + c["ret"]) - cost_u * (c["sold"] - c["ret"])
+        # тапсырыс: 1 данаға WB аударатыны (кешегі выкуптан / өткен аптадан / баға × үлес)
+        if c["sold"]:
+            pay_u = c["sold_pay"] / c["sold"]
+        elif u.get("pay"):
+            pay_u = u["pay"]
+        else:
+            pay_u = (c["ord_sum"] / c["ord"] if c["ord"] else 0) * econ["pay_ratio"]
+        c["p_ord"] = (pay_u - logi_u - cost_u) * c["ord"]
+        ad = ad_nm.get(nm, {}).get("sum", 0)
+        c["p_sold"] -= ad
+        c["p_ord"] -= ad
+
+    def after_tax(x):
+        return x - max(x, 0) * TAX_K
+    ad_no_card = sum(a["sum"] for nm, a in ad_nm.items() if nm not in P)
+    net_sold = after_tax(sum(c["p_sold"] for c in P.values()) - ad_no_card)
+    net_ord = after_tax(sum(c["p_ord"] for c in P.values()) - ad_no_card)
     top = CFG.get("top_cards_sales", 25)
 
     def nm_title(nm, c):
@@ -776,6 +855,14 @@ def build_daily(d, camps, stats, ords, sales, rate=None):
     L = [f"<b>🌅 Күндік есеп: тапсырыс + выкуп</b>", f"🗓 {d:%d.%m.%Y} (кеше)", ""]
     if ords is None or sales is None:
         L.append("⚠️ WB кейбір деректі бермеді (лимит) — сандар толық емес болуы мүмкін\n")
+    L += [f"💰 <b>ТАЗА ПАЙДА (выкуп бойынша): {m(net_sold)}</b>",
+          f"🔮 <b>Тапсырыстан күтілетін таза пайда: {m(net_ord)}</b>",
+          "<i>Таза пайда = WB аударатыны − логистика − себестоимость − жарнама − салық 16%. "
+          "Выкуп — кеше нақты сатып алынғандар; тапсырыс — кешегі тапсырыстардың бәрі сатып алынса.</i>",
+          ""]
+    if no_cost:
+        L.append(f"⚠️ Себестоимость енгізілмеген артикул ({len(no_cost)}): "
+                 + ", ".join(sorted(no_cost)[:10]) + " — пайдасы себестоимостьсыз есептелді\n")
     L += ["<i>Төмендегі «сомасы» — тауарлардың бағасы бойынша жалпы сомасы (ПАЙДА ЕМЕС): "
           "WB комиссиясы, логистика, себестоимость, жарнама, салық әлі шегерілмеген. "
           f"WB бағаны рубльмен береді, ₸-ге айналдырылды: 1 ₽ = {rate:.2f} ₸</i>", "",
@@ -785,7 +872,7 @@ def build_daily(d, camps, stats, ords, sales, rate=None):
           f"↩️ Қайтару: {T['ret']} дана, сомасы {m(T['ret_sum'])}",
           f"📢 Жарнамаға кетті: <b>{m(ad_total)}</b>",
           f"📊 ДРР (жарнама ÷ тапсырыс сомасы): {pct(ad_total, T['ord_sum'])}",
-          "💰 Таза пайда: WB күндік қаржы есебі шыққанда бөлек хабармен келеді (🧾 Күндік таза пайда)"]
+          "🧾 WB-ның ресми күндік қаржы есебі шыққанда нақтыланған таза пайда бөлек хабармен келеді"]
 
     # --- 1-бөлім: тапсырыстар
     o_rows = sorted(((nm, c) for nm, c in P.items() if c["ord"] or c["cancel"]), key=lambda x: -x[1]["ord_sum"])
@@ -796,6 +883,7 @@ def build_daily(d, camps, stats, ords, sales, rate=None):
         L.append(f"   тапсырыс: <b>{c['ord']} дана</b>, сомасы <b>{m(c['ord_sum'])}</b>"
                  + (f" · отмена: {c['cancel']} дана" if c["cancel"] else "")
                  + (f" · жарнамаға кетті: {m(ad)}" if ad else ""))
+        L.append(f"   🔮 күтілетін таза пайда: <b>{m(after_tax(c['p_ord']))}</b>")
     if len(o_rows) > top:
         L.append(f"…тағы {len(o_rows) - top} артикул")
     if not o_rows:
@@ -808,6 +896,7 @@ def build_daily(d, camps, stats, ords, sales, rate=None):
         L.append(f"\n• <b>{nm_title(nm, c)}</b> (арт. {nm})")
         L.append(f"   выкуп: <b>{c['sold']} дана</b>, сомасы <b>{m(c['sold_sum'])}</b>"
                  + (f" · қайтару: {c['ret']} дана, сомасы {m(c['ret_sum'])}" if c["ret"] else ""))
+        L.append(f"   💰 таза пайда: <b>{m(after_tax(c['p_sold']))}</b>")
     if len(s_rows) > top:
         L.append(f"…тағы {len(s_rows) - top} артикул")
     if not s_rows:
@@ -879,7 +968,11 @@ def main():
     if do_ads:
         tg(build_ads(send_at, today, camps, stats, bal))
     if do_daily:
-        tg(build_daily(yday, camps, stats, ords, sales))
+        try:
+            econ = unit_econ(st, today)
+        except Exception:
+            econ = None
+        tg(build_daily(yday, camps, stats, ords, sales, econ=econ, costs=load_costs()))
         if not arg:
             st["sales_done"] = yday.isoformat()
             save_state(st)
